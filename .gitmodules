@@ -1,0 +1,12 @@
+[submodule "samples/containerized-ralph-loop-template"]
+	path = samples/containerized-ralph-loop-template
+	url = https://github.com/ASneakyToast/containerized-ralph-loop-template.git
+[submodule "samples/ralph-claude-code"]
+	path = samples/ralph-claude-code
+	url = https://github.com/frankbria/ralph-claude-code.git
+[submodule "samples/ralph-loop"]
+	path = samples/ralph-loop
+	url = https://github.com/amatelic/ralph-loop.git
+[submodule "samples/ralph-loop-claude-template"]
+	path = samples/ralph-loop-claude-template
+	url = https://github.com/webmatze/ralph_loop_claude_template.git
