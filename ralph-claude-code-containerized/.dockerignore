@@ -1,7 +1,0 @@
-.git
-.github
-node_modules
-npm-debug.log*
-.DS_Store
-*.log
-secrets/
