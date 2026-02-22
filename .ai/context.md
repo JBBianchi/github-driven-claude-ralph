@@ -1,0 +1,24 @@
+- KEY CONSTRAINTS:
+  - Polling-only architecture (no webhooks, no GitHub Actions).
+  - Planner and Executor run in containers with persistent volumes.
+  - `/workspace/repo` canonical clone persists across restarts.
+  - `/workspace/worktrees` task worktrees persist across restarts.
+  - GitHub issues/labels/PRs are source of truth for workflow state.
+  - Planner must never modify code or create PRs.
+  - Executor must modify code only via git worktrees, not base repo working directory.
+  - Must support mounted `~/.claude/.credentials.json` in containers.
+  - Git user/email and GitHub token must be configurable.
+  - GPG signing keys must be mountable (including Windows-host workflows).
+  - Sensitive values must be runtime-injected secrets, never image-baked.
+
+- KEY ASSUMPTIONS:
+  - v1 uses a single target repository per deployment.
+  - A label taxonomy can be created/normalized by bootstrap code.
+  - Merge action is driven via GitHub API and repository branch protection rules.
+  - One isolated executor runs per repo/host in v1.
+  - The system uses Claude Code runtime with mounted `~/.claude/.credentials.json`.
+
+- RELEVANT PATHS / LINKS:
+  - `.agents/skills/ai-scratchpad-planner/SKILL.md`
+  - `.gitmodules` (sample references only; submodules currently not initialized)
+  - User-provided architecture draft in this conversation (primary source)

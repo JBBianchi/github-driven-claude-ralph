@@ -1,0 +1,33 @@
+- MILESTONES:
+  - M0: Decisions lock completed (Claude Code runtime, auto-merge, signing toggle behavior, single-executor scope, label auto-create).
+  - M1: Repo scaffolding + shared domain model + config layer.
+  - M2: Planner loop implementation (plan/task lifecycle).
+  - M3: Executor loop implementation (claim/worktree/PR/review/check loops).
+  - M4: Security/auth hardening (PAT/SSH/GPG/.credentials.json handling).
+  - M5: Test matrix completion (unit/integration/e2e/restart scenarios).
+  - M6: Production docker-compose profile + runbooks.
+
+- TASK BREAKDOWN:
+  - Define explicit state machine for feature/plan/task/PR labels and transitions.
+  - Build GitHub adapter with idempotent create-or-reuse operations.
+  - Build git adapter for clone/fetch/reset/worktree/branch primitives.
+  - Implement Planner worker loop with deterministic plan/task generation gates.
+  - Implement Executor worker loop with claim protocol and resume semantics.
+  - Implement PR monitor + merge gate checks + blocked escalation paths.
+  - Implement secure runtime config and secret/file mounts.
+  - Add observability (structured logs, heartbeat, failure counters, local state cache).
+  - Package into separate planner/executor images sharing one codebase.
+
+- VALIDATION STRATEGY:
+  - Unit tests:
+    - Label/state transition correctness.
+    - Claim protocol state transitions (single-executor profile).
+    - Idempotent "create-or-reuse" behavior for plan/task/branch/worktree/PR.
+  - Integration tests (mock GitHub + local git repo):
+    - Planner end-to-end feature->plan->tasks flow.
+    - Executor task claim->worktree->commit->PR flow.
+    - Resume after container restart with persisted volumes.
+  - System tests (docker compose):
+    - Single-executor restart and resume correctness.
+    - Fault injection (API failures, merge conflicts, failed checks).
+    - Secret mount and missing-secret failure-mode tests.

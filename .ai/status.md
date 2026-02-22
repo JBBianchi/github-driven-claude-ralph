@@ -1,0 +1,12 @@
+- GOAL: Produce an implementation-ready, testable plan for a dockerized Planner/Executor Claude-agent system using GitHub as source of truth.
+- CURRENT FOCUS: Decision lock applied; plan is ready to transition into M1 scaffolding.
+- NEXT ACTIONS:
+  - Start implementation scaffold (M1): shared config + git/GitHub adapters.
+  - Add compose runtime validation for credentials, PAT, and optional GPG setup.
+- OUT OF SCOPE:
+  - Full production code implementation in this turn.
+  - Webhooks, GitHub Actions, GitHub App migration.
+  - Multi-repo orchestration.
+- BLOCKED BY:
+  - None.
+- LAST UPDATED: 2026-02-22
