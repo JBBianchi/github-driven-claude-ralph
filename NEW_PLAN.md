@@ -1,60 +1,86 @@
-# Dockerized Planner/Executor — Revised Plan
+# Dockerized Planner/Executor — Revised Plan (v2)
 
-Date: 2026-02-22
+Date: 2026-02-23
 
 ## 1) Philosophy
 
 Claude Code already knows how to use `gh`, `git`, read code, write code, and reason about
 GitHub issues. We don't need to reimplement those capabilities in custom adapters.
 
-This plan builds **thin bash harnesses** that handle the boring deterministic work
-(loops, timing, credential setup, worktree management) and delegate all reasoning to
-Claude Code invoked in `-p` (print/headless) mode with role-specific prompts.
+This plan builds a **TypeScript orchestration layer** that handles the deterministic work
+(loops, timing, task claiming, worktree management, PR monitoring) and delegates all
+reasoning to Claude Code invoked in `-p` (print/headless) mode with role-specific prompts.
+
+A **minimal bash entrypoint** handles OS-level plumbing that is genuinely better in shell:
+credential import, key permissions, git identity, and `gh` auth. Everything else is TypeScript.
 
 The complexity lives in the **prompts**, not the code.
+
+Why TypeScript over bash: Node.js is already required for Claude Code CLI. Since the
+runtime dependency exists regardless, TypeScript gives us type safety, proper error handling,
+async/await for concurrent operations, and testability — without adding any new dependencies.
 
 ## 2) Architecture overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Docker image  (one image, two entrypoint commands)     │
-│                                                         │
-│  Installed: node, claude code, git, gh, gpg             │
-│                                                         │
-│  entrypoint.sh                                          │
-│    ├── read secrets (token, GPG key)                    │
-│    ├── configure git identity + signing                 │
-│    ├── authenticate gh CLI                              │
-│    └── exec planner-loop.sh | executor-loop.sh          │
-│                                                         │
-│  planner-loop.sh              executor-loop.sh          │
-│    while true:                  while true:             │
-│      sync repo                    sync repo             │
-│      claude -p <planner>          find/claim task (gh)  │
-│      sleep                        setup worktree        │
-│                                   claude -p <executor>  │
-│                                   monitor PR (gh)       │
-│                                   sleep                 │
-│                                                         │
-│  Claude does the thinking:                              │
-│    reads issues, writes plans, writes code,             │
-│    creates PRs, commits, pushes                         │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  Docker image  (one image, two entrypoint commands)         │
+│                                                             │
+│  Installed: node, claude code, git, gh, gpg, openssh        │
+│                                                             │
+│  entrypoint.sh  (bash — OS plumbing only)                   │
+│    ├── read GH_TOKEN from env                               │
+│    ├── configure git identity + HTTPS auth                  │
+│    ├── import signing keys (off/gpg/ssh)                    │
+│    ├── authenticate gh CLI                                  │
+│    ├── validate Claude credentials file                     │
+│    └── exec node dist/index.js <planner|executor>           │
+│                                                             │
+│  TypeScript orchestration (compiled to dist/)               │
+│                                                             │
+│  planner.ts                   executor.ts                   │
+│    while true:                  while true:                 │
+│      syncRepo()                   syncRepo()                │
+│      Phase 1: plan.md prompt      Phase 0: recover state    │
+│      Phase 2: tasks.md prompt     Phase 1: claimTask()      │
+│      sleep()                      Phase 2: ensureWorktree() │
+│                                   Phase 3: exec.md prompt   │
+│                                   Phase 4: PR monitoring    │
+│                                   Phase 5: review.md prompt │
+│                                   sleep()                   │
+│                                                             │
+│  Claude does the thinking:                                  │
+│    reads issues, writes plans, writes code,                 │
+│    creates PRs, commits, pushes                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## 3) Responsibility split: bash vs Claude
+## 3) Responsibility split
 
-### Bash handles (deterministic, cheap, reliable)
+### Bash handles (OS plumbing — `entrypoint.sh` only)
 
-- Loop timing and sleep intervals
-- Credential setup (GPG import, git config, gh auth)
-- Repo sync (`git fetch`, `git reset`)
-- Task claiming and label transitions (`gh issue edit`)
-- Worktree creation/reuse (`git worktree add`)
-- PR status polling (`gh pr view`, `gh pr checks`)
-- PR merging (`gh pr merge`)
-- Cost controls (max turns, budget caps, rate limits)
+- Git identity (`git config --global`)
+- HTTPS token-based git auth
+- GPG key import (copy from mount → container-owned path → `gpg --import`)
+- SSH key setup (copy from mount → container-owned path → `chmod 600`)
+- `gh auth login --with-token`
+- Claude credentials file validation
+
+### TypeScript handles (deterministic orchestration)
+
+- Polling loops and sleep intervals
+- Repo sync (`git fetch`, `git reset` via `execa`)
+- Task claiming with nonce-based lease pattern
+- Label transitions (`gh issue edit` via `execa`)
+- Worktree creation/reuse (`git worktree add` via `execa`)
+- Claude CLI invocation and output parsing
+- PR status polling and merge decisions
+- CI failure review loop
 - State files (active task ID, session ID)
+- Cost controls (max turns, rate limits)
+- Structured logging
+- Env var parsing and validation
+- Graceful shutdown (SIGTERM handler)
 
 ### Claude handles (reasoning, creative, expensive)
 
@@ -75,31 +101,40 @@ The complexity lives in the **prompts**, not the code.
 Dockerfile
 docker-compose.yml
 .env.example
+package.json
+tsconfig.json
+src/
+  index.ts              # parse role arg, launch planner or executor loop
+  planner.ts            # planner polling loop (two-phase: plan + tasks)
+  executor.ts           # executor polling loop (claim → implement → review → merge)
+  claude.ts             # claude -p CLI invocation wrapper
+  github.ts             # gh CLI wrapper (issues, PRs, labels, comments)
+  git.ts                # git CLI wrapper (sync, worktree, commit, push)
+  signing.ts            # signing validation (entrypoint does the actual import)
+  state.ts              # local state file management + GitHub recovery
+  config.ts             # env var parsing + validation + defaults
+  types.ts              # shared type definitions
+  logger.ts             # structured logging with timestamps
 scripts/
-  entrypoint.sh             # credential/identity setup, then exec loop
-  planner-loop.sh           # planner outer loop
-  executor-loop.sh          # executor outer loop
-  lib.sh                    # shared bash functions
+  entrypoint.sh         # credential setup only, then exec node
 prompts/
-  planner.md                # appended system prompt for planner role
-  executor-implement.md     # appended system prompt for executor (code phase)
-  executor-plan-task.md     # appended system prompt for executor (plan reading)
-secrets/                    # gitignored, mounted at runtime
-  github_token.txt
-  gpg_private_key.asc       # optional, armored export from Windows
-  gpg_passphrase.txt        # optional
+  plan.md               # planner: create/update plan issues from features
+  tasks.md              # planner: decompose approved plans into task issues
+  exec.md               # executor: implement code changes
+  review.md             # executor: diagnose CI failures and propose fixes
+secrets/                # gitignored, mounted at runtime
+  gpg_private_key.asc   # optional, armored GPG key export
+  ssh_signing_key       # optional, SSH private key
+  ssh_signing_key.pub   # optional, SSH public key
 ```
 
 ## 5) Dockerfile
 
-Single-stage image based on `node:20`. Installs:
-
-- `@anthropic-ai/claude-code` (npm, pinned version)
-- `git`, `gh` (GitHub CLI), `gpg`, `jq`
-- Non-root user `agent` with home at `/home/agent`
+Multi-stage build: compile TypeScript in the `build` stage, copy only compiled JS and
+production dependencies to the `runtime` stage.
 
 ```dockerfile
-FROM node:20-slim
+FROM node:20-slim AS base
 
 ARG CLAUDE_CODE_VERSION=latest
 
@@ -113,8 +148,27 @@ RUN useradd -m -s /bin/bash agent
 RUN mkdir -p /workspace/repo /workspace/worktrees /workspace/state \
     && chown -R agent:agent /workspace
 
-COPY --chmod=755 scripts/ /opt/agent/scripts/
+# --- Build stage: compile TypeScript ---
+FROM base AS build
+
+WORKDIR /opt/agent
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
+COPY src/ ./src/
+RUN npx tsc
+
+# --- Runtime stage ---
+FROM base AS runtime
+
+WORKDIR /opt/agent
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY --from=build /opt/agent/dist/ ./dist/
+COPY --chmod=755 scripts/entrypoint.sh /opt/agent/scripts/entrypoint.sh
 COPY prompts/ /opt/agent/prompts/
+
+RUN chown -R agent:agent /opt/agent
 
 USER agent
 WORKDIR /workspace
@@ -126,11 +180,28 @@ ENTRYPOINT ["/opt/agent/scripts/entrypoint.sh"]
 ```
 
 Key choices:
-- `node:20-slim` not `node:20` — smaller image, we don't need build tools
-- `gh` installed via apt (available in Debian repos) — used by both bash and Claude
+- `node:20-slim` — smaller image; Node is required for Claude Code CLI anyway
+- Multi-stage — `build` stage has full devDependencies (TypeScript compiler); `runtime` has only production deps
+- Layer caching — `package.json`/`package-lock.json` copied before source so `npm ci` is cached unless deps change
 - Non-root `agent` user for security
 - `/workspace/` as the working root, matching the volume contract
 - Auto-updater disabled for deterministic container builds
+
+### Build-time secrets policy
+
+**No secrets are baked into the image.** If the build ever requires private access
+(e.g., private npm registries, private git dependencies), use Docker BuildKit secrets:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+RUN --mount=type=secret,id=npm_token \
+    NPM_TOKEN=$(cat /run/secrets/npm_token) npm ci
+```
+
+Build with: `docker build --secret id=npm_token,env=NPM_TOKEN .`
+
+BuildKit secrets are never written to image layers. This is a normative requirement:
+any future build-time credential must use `--mount=type=secret`, never `ARG` or `ENV`.
 
 ## 6) docker-compose.yml
 
@@ -141,49 +212,49 @@ services:
     command: ["planner"]
     restart: unless-stopped
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       REPO_URL: ${REPO_URL}
       REPO_SLUG: ${REPO_SLUG}
       BASE_BRANCH: ${BASE_BRANCH:-main}
       GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME}
       GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL}
-      GITHUB_TOKEN_FILE: /run/secrets/github_token
-      POLL_INTERVAL: ${PLANNER_POLL_INTERVAL:-120}
+      PLANNER_POLL_INTERVAL_SECONDS: ${PLANNER_POLL_INTERVAL_SECONDS:-120}
       MAX_TURNS_PER_RUN: ${PLANNER_MAX_TURNS:-30}
-      ENABLE_GPG_SIGNING: ${ENABLE_GPG_SIGNING:-false}
-      GPG_KEY_ID: ${GPG_KEY_ID:-}
+      GIT_COMMIT_SIGNING: ${GIT_COMMIT_SIGNING:-off}
+      GIT_SIGNING_KEY: ${GIT_SIGNING_KEY:-}
+      SIGNING_KEYS_MOUNT: /mnt/host-keys
+    secrets:
+      - GH_TOKEN
     volumes:
       - repo_data:/workspace/repo
       - state_data:/workspace/state
-    secrets:
-      - github_token
-      - gpg_private_key
+      - ${CLAUDE_CREDENTIALS_FILE}:/home/agent/.claude/.credentials.json:ro
+      - ${SIGNING_KEYS_PATH:-./secrets}:/mnt/host-keys:ro
 
   executor:
     build: .
     command: ["executor"]
     restart: unless-stopped
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       REPO_URL: ${REPO_URL}
       REPO_SLUG: ${REPO_SLUG}
       BASE_BRANCH: ${BASE_BRANCH:-main}
       GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME}
       GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL}
-      GITHUB_TOKEN_FILE: /run/secrets/github_token
       EXECUTOR_ID: ${EXECUTOR_ID:-executor-01}
-      POLL_INTERVAL: ${EXECUTOR_POLL_INTERVAL:-60}
+      EXECUTOR_POLL_INTERVAL_SECONDS: ${EXECUTOR_POLL_INTERVAL_SECONDS:-60}
       MAX_TURNS_PER_RUN: ${EXECUTOR_MAX_TURNS:-50}
       VALIDATION_COMMAND: ${VALIDATION_COMMAND:-}
-      ENABLE_GPG_SIGNING: ${ENABLE_GPG_SIGNING:-false}
-      GPG_KEY_ID: ${GPG_KEY_ID:-}
+      GIT_COMMIT_SIGNING: ${GIT_COMMIT_SIGNING:-off}
+      GIT_SIGNING_KEY: ${GIT_SIGNING_KEY:-}
+      SIGNING_KEYS_MOUNT: /mnt/host-keys
+    secrets:
+      - GH_TOKEN
     volumes:
       - repo_data:/workspace/repo
       - worktrees_data:/workspace/worktrees
       - state_data:/workspace/state
-    secrets:
-      - github_token
-      - gpg_private_key
+      - ${CLAUDE_CREDENTIALS_FILE}:/home/agent/.claude/.credentials.json:ro
+      - ${SIGNING_KEYS_PATH:-./secrets}:/mnt/host-keys:ro
 
 volumes:
   repo_data:
@@ -191,15 +262,19 @@ volumes:
   state_data:
 
 secrets:
-  github_token:
-    file: ./secrets/github_token.txt
-  gpg_private_key:
-    file: ./secrets/gpg_private_key.asc
+  GH_TOKEN:
+    environment: GH_TOKEN
 ```
+
+Key choices:
+- `GH_TOKEN` as a Docker Compose secret sourced from environment — tokens are sensitive and must never be passed as plain environment variables (visible in `docker inspect`, process listings, logs)
+- Claude auth via mounted `.credentials.json` file (read-only)
+- Signing keys mounted read-only at `/mnt/host-keys`, copied to container-owned paths by entrypoint
+- Shared `repo_data` volume — planner only reads; executor uses separate worktrees volume
 
 ## 7) entrypoint.sh
 
-Runs before the loop starts. Handles all credential/identity setup.
+Runs before Node.js starts. Handles OS-level credential setup only.
 
 ```bash
 #!/usr/bin/env bash
@@ -207,282 +282,654 @@ set -euo pipefail
 
 ROLE="${1:?Usage: entrypoint.sh <planner|executor>}"
 
-# --- Load GitHub token ---
-if [ -f "${GITHUB_TOKEN_FILE:-}" ]; then
-  GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
-  export GITHUB_TOKEN
+# =========================================================
+# 1. GitHub token (from Docker secret or env var fallback)
+# =========================================================
+GH_TOKEN_FILE="/run/secrets/GH_TOKEN"
+if [ -f "$GH_TOKEN_FILE" ]; then
+  GH_TOKEN="$(cat "$GH_TOKEN_FILE")"
+  export GH_TOKEN
+  export GITHUB_TOKEN="$GH_TOKEN"
+elif [ -n "${GH_TOKEN:-}" ]; then
+  export GITHUB_TOKEN="$GH_TOKEN"
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
   export GH_TOKEN="$GITHUB_TOKEN"
 fi
-[ -z "${GITHUB_TOKEN:-}" ] && echo "FATAL: No GitHub token" && exit 1
+[ -z "${GH_TOKEN:-}" ] && echo "FATAL: No GitHub token (mount as secret or set GH_TOKEN)" && exit 1
 
-# --- Git identity ---
-git config --global user.name  "${GIT_AUTHOR_NAME:?}"
-git config --global user.email "${GIT_AUTHOR_EMAIL:?}"
+# =========================================================
+# 2. Git identity
+# =========================================================
+git config --global user.name  "${GIT_AUTHOR_NAME:?GIT_AUTHOR_NAME required}"
+git config --global user.email "${GIT_AUTHOR_EMAIL:?GIT_AUTHOR_EMAIL required}"
 
-# --- Git auth (HTTPS token) ---
-git config --global url."https://${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+# Git HTTPS auth via token
+git config --global url."https://${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
-# --- GPG signing (optional) ---
-if [ "${ENABLE_GPG_SIGNING:-false}" = "true" ]; then
-  KEY_FILE="/run/secrets/gpg_private_key"
-  if [ -f "$KEY_FILE" ]; then
-    # Fix Windows CRLF line endings before import
-    tr -d '\r' < "$KEY_FILE" | gpg --batch --import
+# =========================================================
+# 3. Signing key import (copy from mount, never use in-place)
+# =========================================================
+SIGNING_MODE="${GIT_COMMIT_SIGNING:-off}"
+KEYS_MOUNT="${SIGNING_KEYS_MOUNT:-/mnt/host-keys}"
+
+case "$SIGNING_MODE" in
+  gpg)
+    echo "Configuring GPG signing..."
+    GPG_KEY_SRC="${KEYS_MOUNT}/gpg_private_key.asc"
+    GPG_KEY_DST="/home/agent/.gnupg/import.asc"
+    mkdir -p /home/agent/.gnupg
+    chmod 700 /home/agent/.gnupg
+    if [ -f "$GPG_KEY_SRC" ]; then
+      # Copy and fix Windows CRLF line endings + BOM
+      tr -d '\r' < "$GPG_KEY_SRC" > "$GPG_KEY_DST"
+      sed -i '1s/^\xEF\xBB\xBF//' "$GPG_KEY_DST"
+      gpg --batch --import "$GPG_KEY_DST"
+      rm -f "$GPG_KEY_DST"
+    else
+      echo "FATAL: GPG signing enabled but ${GPG_KEY_SRC} not found" && exit 1
+    fi
     git config --global commit.gpgsign true
-    git config --global user.signingkey "${GPG_KEY_ID:?GPG_KEY_ID required when signing enabled}"
-    # Allow gpg in containers without a real tty
+    git config --global user.signingkey "${GIT_SIGNING_KEY:?GIT_SIGNING_KEY required for GPG signing}"
     export GPG_TTY=$(tty 2>/dev/null || echo "/dev/console")
-    echo "GPG signing configured (key: ${GPG_KEY_ID})"
-  else
-    echo "FATAL: GPG signing enabled but key file missing" && exit 1
-  fi
+    echo "GPG signing configured (key: ${GIT_SIGNING_KEY})"
+    ;;
+  ssh)
+    echo "Configuring SSH signing..."
+    SSH_KEY_SRC="${KEYS_MOUNT}/ssh_signing_key"
+    SSH_PUB_SRC="${KEYS_MOUNT}/ssh_signing_key.pub"
+    SSH_KEY_DST="/home/agent/.ssh/signing_key"
+    SSH_PUB_DST="/home/agent/.ssh/signing_key.pub"
+    mkdir -p /home/agent/.ssh
+    chmod 700 /home/agent/.ssh
+    if [ -f "$SSH_KEY_SRC" ] && [ -f "$SSH_PUB_SRC" ]; then
+      cp "$SSH_KEY_SRC" "$SSH_KEY_DST"
+      cp "$SSH_PUB_SRC" "$SSH_PUB_DST"
+      chmod 600 "$SSH_KEY_DST"
+      chmod 644 "$SSH_PUB_DST"
+    else
+      echo "FATAL: SSH signing enabled but key files not found in ${KEYS_MOUNT}" && exit 1
+    fi
+    git config --global gpg.format ssh
+    git config --global commit.gpgsign true
+    git config --global user.signingkey "$SSH_PUB_DST"
+    echo "SSH signing configured"
+    ;;
+  off)
+    echo "Commit signing disabled"
+    git config --global commit.gpgsign false
+    ;;
+  *)
+    echo "FATAL: Unknown GIT_COMMIT_SIGNING value: ${SIGNING_MODE} (expected: off|gpg|ssh)" && exit 1
+    ;;
+esac
+
+# =========================================================
+# 4. Authenticate gh CLI
+# =========================================================
+echo "$GH_TOKEN" | gh auth login --with-token
+
+# =========================================================
+# 5. Validate Claude credentials
+# =========================================================
+CLAUDE_CREDS="/home/agent/.claude/.credentials.json"
+if [ ! -f "$CLAUDE_CREDS" ]; then
+  echo "FATAL: Claude credentials file not found at ${CLAUDE_CREDS}"
+  echo "Mount your credentials file via: -v /path/to/.credentials.json:${CLAUDE_CREDS}:ro"
+  exit 1
 fi
 
-# --- gh CLI auth ---
-echo "$GITHUB_TOKEN" | gh auth login --with-token
-
-# --- Launch loop ---
-exec "/opt/agent/scripts/${ROLE}-loop.sh"
+# =========================================================
+# 6. Hand off to TypeScript
+# =========================================================
+exec node /opt/agent/dist/index.js "$ROLE"
 ```
 
-## 8) Planner loop
+Key differences from v1:
+- Tri-state signing (`off|gpg|ssh`) instead of boolean
+- Keys **copied** from mount to container-owned paths — fixes Windows permission issues
+- Strips both CRLF and BOM from GPG keys
+- Validates Claude credentials file before starting
+- Final `exec` runs Node.js, not bash loop scripts
 
-`scripts/planner-loop.sh` — the outer loop is simple; Claude does the real work.
+## 8) TypeScript modules
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source /opt/agent/scripts/lib.sh
+### package.json
 
-echo "=== Planner starting (repo: ${REPO_SLUG}, interval: ${POLL_INTERVAL}s) ==="
-
-while true; do
-  sync_repo
-
-  # Count features needing plans
-  count=$(gh issue list -R "$REPO_SLUG" -l "feature,needs-plan" --json number --jq 'length')
-
-  if [ "$count" -gt 0 ]; then
-    echo "[$(date -Is)] Found $count feature(s) needing plans"
-
-    claude -p \
-      "$(build_planner_context)" \
-      --append-system-prompt-file /opt/agent/prompts/planner.md \
-      --dangerously-skip-permissions \
-      --max-turns "${MAX_TURNS_PER_RUN}" \
-      --output-format text \
-      --verbose \
-      2>&1 | tee -a /workspace/state/planner.log
-
-    echo "[$(date -Is)] Planner run complete"
-  else
-    echo "[$(date -Is)] No features need planning. Sleeping."
-  fi
-
-  sleep "$POLL_INTERVAL"
-done
-```
-
-The `build_planner_context` function (in `lib.sh`) constructs the user prompt:
-
-```bash
-build_planner_context() {
-  cat <<EOF
-You are the Planner agent for repository ${REPO_SLUG}.
-Working directory: /workspace/repo (synced to ${BASE_BRANCH})
-
-Find all GitHub issues labeled "feature" + "needs-plan" and process them.
-Use \`gh\` for all GitHub API operations.
-EOF
+```json
+{
+  "name": "github-driven-claude-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "start:planner": "node dist/index.js planner",
+    "start:executor": "node dist/index.js executor",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "execa": "^9.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
 }
 ```
 
-The actual planning instructions (what to do, what labels to set, how to format plans)
-live in `prompts/planner.md`, passed via `--append-system-prompt-file`.
+Single runtime dependency: `execa`. All other tools (`git`, `gh`, `claude`) are CLI
+subprocesses invoked via `execa`.
 
-## 9) Executor loop
+### tsconfig.json
 
-`scripts/executor-loop.sh` — more complex because it manages worktrees and task lifecycle.
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source /opt/agent/scripts/lib.sh
-
-STATE_DIR="/workspace/state/executor/${EXECUTOR_ID}"
-mkdir -p "$STATE_DIR"
-
-echo "=== Executor ${EXECUTOR_ID} starting (repo: ${REPO_SLUG}) ==="
-
-while true; do
-  sync_repo
-
-  active_task=$(cat "$STATE_DIR/active_task" 2>/dev/null || echo "")
-
-  # --- Phase 1: Resume or claim a task ---
-  if [ -z "$active_task" ]; then
-    active_task=$(claim_next_task)
-    if [ -z "$active_task" ]; then
-      echo "[$(date -Is)] No tasks available. Sleeping."
-      sleep "$POLL_INTERVAL"
-      continue
-    fi
-    echo "$active_task" > "$STATE_DIR/active_task"
-  fi
-
-  echo "[$(date -Is)] Working on task #${active_task}"
-  task_title=$(gh issue view "$active_task" -R "$REPO_SLUG" --json title --jq '.title')
-  task_body=$(gh issue view "$active_task" -R "$REPO_SLUG" --json body --jq '.body')
-
-  # --- Phase 2: Ensure worktree ---
-  branch="task/${active_task}-$(slugify "$task_title")"
-  worktree="/workspace/worktrees/${active_task}"
-  ensure_worktree "$active_task" "$branch" "$worktree"
-
-  # --- Phase 3: Claude implements ---
-  session_file="$STATE_DIR/session_${active_task}"
-  resume_flag=""
-  if [ -f "$session_file" ]; then
-    resume_flag="--resume $(cat "$session_file")"
-  fi
-
-  claude -p \
-    "$(build_executor_context "$active_task" "$task_title" "$task_body")" \
-    --append-system-prompt-file /opt/agent/prompts/executor-implement.md \
-    --dangerously-skip-permissions \
-    --max-turns "${MAX_TURNS_PER_RUN}" \
-    --output-format json \
-    $resume_flag \
-    2>&1 | tee "$STATE_DIR/run_${active_task}.log" \
-    | jq -r '.session_id // empty' > "$session_file.tmp"
-
-  # Save session ID for resume on next iteration
-  [ -s "$session_file.tmp" ] && mv "$session_file.tmp" "$session_file"
-
-  # --- Phase 4: Check PR and merge ---
-  pr_number=$(gh pr list -R "$REPO_SLUG" --head "$branch" --json number --jq '.[0].number // empty')
-
-  if [ -n "$pr_number" ]; then
-    pr_status=$(check_pr_status "$pr_number")
-    case "$pr_status" in
-      mergeable)
-        echo "[$(date -Is)] PR #${pr_number} ready — merging"
-        gh pr merge "$pr_number" -R "$REPO_SLUG" --squash --delete-branch
-        gh issue edit "$active_task" -R "$REPO_SLUG" \
-          --add-label "done" --remove-label "in-progress,claimed-by:${EXECUTOR_ID}"
-        gh issue close "$active_task" -R "$REPO_SLUG"
-        complete_task "$active_task"
-        ;;
-      failing)
-        echo "[$(date -Is)] PR #${pr_number} checks failing — will retry next iteration"
-        ;;
-      pending)
-        echo "[$(date -Is)] PR #${pr_number} checks pending — will check next iteration"
-        ;;
-    esac
-  else
-    echo "[$(date -Is)] No PR yet for task #${active_task} — will continue next iteration"
-  fi
-
-  sleep "$POLL_INTERVAL"
-done
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
 ```
 
-## 10) Shared library (lib.sh)
+### src/types.ts — shared type definitions
 
-```bash
-#!/usr/bin/env bash
+```typescript
+export type Role = 'planner' | 'executor';
+export type SigningMode = 'off' | 'gpg' | 'ssh';
 
-sync_repo() {
-  if [ ! -d /workspace/repo/.git ]; then
-    echo "[$(date -Is)] Cloning ${REPO_URL}..."
-    git clone "${REPO_URL}" /workspace/repo
-  fi
-  git -C /workspace/repo fetch origin
-  git -C /workspace/repo checkout "${BASE_BRANCH}"
-  git -C /workspace/repo reset --hard "origin/${BASE_BRANCH}"
+export interface Config {
+  role: Role;
+  repoUrl: string;
+  repoSlug: string;           // "org/repo"
+  baseBranch: string;          // default "main"
+  ghToken: string;
+  pollIntervalSeconds: number; // role-specific default
+  executorId: string;          // only meaningful for executor
+  maxTurnsPerRun: number;
+  gitCommitSigning: SigningMode;
+  gitSigningKey: string;
+  signingKeysMount: string;
+  validationCommand: string;   // optional, executor only
+  gitAuthorName: string;
+  gitAuthorEmail: string;
 }
 
-claim_next_task() {
-  local task_id
-  task_id=$(gh issue list -R "$REPO_SLUG" -l "task,todo" \
-    --json number --jq '.[0].number // empty' 2>/dev/null)
-  if [ -n "$task_id" ]; then
-    # Claim: swap labels
-    gh issue edit "$task_id" -R "$REPO_SLUG" \
-      --add-label "in-progress,claimed-by:${EXECUTOR_ID}" \
-      --remove-label "todo"
-    # Verify claim succeeded
-    local labels
-    labels=$(gh issue view "$task_id" -R "$REPO_SLUG" --json labels --jq '[.labels[].name] | join(",")')
-    if echo "$labels" | grep -q "claimed-by:${EXECUTOR_ID}"; then
-      echo "$task_id"
-      return
-    fi
-  fi
-  echo ""
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  body: string;
+  labels: string[];
+  state: 'OPEN' | 'CLOSED';
 }
 
-ensure_worktree() {
-  local task_id="$1" branch="$2" worktree="$3"
-  if [ -d "$worktree" ]; then
-    echo "[$(date -Is)] Reusing existing worktree at $worktree"
-    git -C "$worktree" fetch origin
-    return
-  fi
-  # Check if branch exists on remote
-  if git -C /workspace/repo ls-remote --heads origin "$branch" | grep -q "$branch"; then
-    git -C /workspace/repo worktree add "$worktree" "origin/$branch"
-  else
-    git -C /workspace/repo worktree add "$worktree" -b "$branch" "origin/${BASE_BRANCH}"
-  fi
+export interface GitHubPR {
+  number: number;
+  title: string;
+  headBranch: string;
+  mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
+  reviewDecision: string | null;
+  checksStatus: ChecksStatus;
 }
 
-complete_task() {
-  local task_id="$1"
-  rm -f "$STATE_DIR/active_task" "$STATE_DIR/session_${task_id}"
-  echo "[$(date -Is)] Task #${task_id} complete"
+export type ChecksStatus = 'passing' | 'failing' | 'pending';
+export type PRStatus = 'mergeable' | 'failing' | 'pending' | 'conflicting';
+
+export interface AgentMeta {
+  entity: 'plan' | 'task';
+  source_feature: number;
+  source_plan?: number;
+  executor_id?: string;
+  branch?: string;
+  pr?: number;
 }
 
-check_pr_status() {
-  local pr="$1"
-  local state
-  state=$(gh pr view "$pr" -R "$REPO_SLUG" --json mergeable,reviewDecision,statusCheckRollup \
-    --jq '{
-      mergeable: .mergeable,
-      review: .reviewDecision,
-      checks: [.statusCheckRollup[]?.conclusion // "PENDING"] | unique
-    }')
-  local checks
-  checks=$(echo "$state" | jq -r '.checks | join(",")')
-  local mergeable
-  mergeable=$(echo "$state" | jq -r '.mergeable')
-
-  if [ "$mergeable" = "MERGEABLE" ] && ! echo "$checks" | grep -qiE "pending|null"; then
-    echo "mergeable"
-  elif echo "$checks" | grep -qi "failure"; then
-    echo "failing"
-  else
-    echo "pending"
-  fi
+export interface ClaudeInvocation {
+  prompt: string;
+  systemPromptFile?: string;
+  maxTurns: number;
+  outputFormat: 'text' | 'json';
+  workingDirectory: string;
+  resumeSessionId?: string;
 }
 
-slugify() {
-  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 40
+export interface ClaudeResult {
+  success: boolean;
+  sessionId?: string;
+  result?: string;
+  durationMs: number;
 }
 
-build_executor_context() {
-  local task_id="$1" title="$2" body="$3"
-  cat <<EOF
-You are the Executor agent for repository ${REPO_SLUG}.
-Working directory: /workspace/worktrees/${task_id} (branch for this task)
-Task issue: #${task_id} — ${title}
+export interface ExecutorState {
+  activeTaskId: number | null;
+  sessionId: string | null;
+}
+
+export interface ClaimAttempt {
+  taskId: number;
+  nonce: string;
+  success: boolean;
+}
+```
+
+### src/config.ts — env var parsing
+
+Loads all environment variables, applies defaults, validates required values.
+Fails fast with clear error messages.
+
+```typescript
+export function loadConfig(): Config;
+```
+
+Required env vars: `REPO_URL`, `REPO_SLUG`, `GH_TOKEN` (or `GITHUB_TOKEN`),
+`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`.
+
+Defaults: `BASE_BRANCH=main`, `PLANNER_POLL_INTERVAL_SECONDS=120`,
+`EXECUTOR_POLL_INTERVAL_SECONDS=60`, `EXECUTOR_ID=executor-01`,
+`MAX_TURNS_PER_RUN=30` (planner) / `50` (executor),
+`GIT_COMMIT_SIGNING=off`, `SIGNING_KEYS_MOUNT=/mnt/host-keys`.
+
+### src/logger.ts — structured logging
+
+```typescript
+export interface Logger {
+  info(message: string, context?: Record<string, unknown>): void;
+  warn(message: string, context?: Record<string, unknown>): void;
+  error(message: string, context?: Record<string, unknown>): void;
+}
+
+export function createLogger(role: Role, executorId?: string): Logger;
+```
+
+Output: `[2026-02-23T10:00:00.000Z] [planner] INFO: message {context}`.
+Writes to stdout. No external logging library in v1.
+
+### src/git.ts — git CLI wrapper
+
+```typescript
+/** Clone if missing, then fetch + checkout + reset to origin/BASE_BRANCH */
+export async function syncRepo(config: Config): Promise<void>;
+
+/** Ensure worktree exists for task. Returns worktree path. */
+export async function ensureWorktree(
+  config: Config, taskId: number, branch: string,
+): Promise<string>;
+
+/** Push current branch in worktree to origin */
+export async function pushBranch(worktreePath: string): Promise<void>;
+
+/** Generate branch name: task/<id>-<slugified-title> */
+export function makeBranchName(taskId: number, title: string): string;
+```
+
+All calls use `execa('git', [...args], { cwd })`.
+
+### src/github.ts — gh CLI wrapper
+
+```typescript
+/** List issues matching labels */
+export async function listIssues(config: Config, labels: string[]): Promise<GitHubIssue[]>;
+
+/** Create an issue, returns issue number */
+export async function createIssue(
+  config: Config, title: string, body: string, labels: string[],
+): Promise<number>;
+
+/** Add/remove labels on an issue */
+export async function editIssueLabels(
+  config: Config, issueNumber: number, add: string[], remove: string[],
+): Promise<void>;
+
+/** Ensure all workflow labels exist (idempotent) */
+export async function ensureLabels(config: Config): Promise<void>;
+
+/** Find PR by head branch */
+export async function findPRByBranch(config: Config, branch: string): Promise<GitHubPR | null>;
+
+/** Get PR status: mergeable / failing / pending / conflicting */
+export async function getPRStatus(config: Config, prNumber: number): Promise<PRStatus>;
+
+/** Get CI failure details for review prompt */
+export async function getPRCheckDetails(config: Config, prNumber: number): Promise<string>;
+
+/** Squash-merge a PR */
+export async function mergePR(config: Config, prNumber: number): Promise<void>;
+
+/** Nonce-based task claiming: label swap + bot comment + re-read + verify */
+export async function claimTask(config: Config, taskId: number): Promise<ClaimAttempt>;
+
+/** Post machine-readable comment recording branch/worktree/PR mapping */
+export async function postWorkMapping(
+  config: Config, taskId: number, branch: string, worktreePath: string, prNumber?: number,
+): Promise<void>;
+```
+
+#### Claim protocol (nonce-based lease)
+
+1. Generate a UUID nonce
+2. Add labels `in-progress` + `claimed-by:<EXECUTOR_ID>`, remove `todo`
+3. Post comment: `<!-- claim-nonce:<nonce> executor:<EXECUTOR_ID> -->`
+4. Wait 1 second (allow GitHub to propagate)
+5. Re-read issue labels and comments
+6. If another executor's `claimed-by:` label or newer claim-nonce exists, we're the loser — unclaim and return `{ success: false }`
+
+### src/claude.ts — Claude Code CLI wrapper
+
+```typescript
+/**
+ * Invoke Claude Code CLI in headless (-p) mode.
+ *
+ * Uses --append-system-prompt-file (not --system-prompt-file) to preserve
+ * Claude Code's built-in tool instructions (Bash, Read, Edit, etc.).
+ *
+ * Design: We call the CLI rather than the TypeScript SDK because the CLI
+ * provides the full Claude Code agent loop (tool use, file editing, bash
+ * execution) out of the box.
+ */
+export async function invokeClaude(invocation: ClaudeInvocation): Promise<ClaudeResult>;
+```
+
+Implementation builds CLI args from the `ClaudeInvocation` object:
+
+```typescript
+const args = [
+  '-p', invocation.prompt,
+  '--dangerously-skip-permissions',
+  '--max-turns', String(invocation.maxTurns),
+  '--output-format', invocation.outputFormat,
+  '--verbose',
+];
+if (invocation.systemPromptFile) {
+  args.push('--append-system-prompt-file', invocation.systemPromptFile);
+}
+if (invocation.resumeSessionId) {
+  args.push('--resume', invocation.resumeSessionId);
+}
+```
+
+Timeout: 30 minutes per invocation (separate from `--max-turns`).
+On JSON output, parses `session_id` from response for resume support.
+
+### src/state.ts — local state management
+
+```typescript
+/** Read executor state from local file. Returns null if missing. */
+export function readExecutorState(executorId: string): ExecutorState | null;
+
+/** Write executor state to local file */
+export function writeExecutorState(executorId: string, state: ExecutorState): void;
+
+/** Clear active task from state */
+export function clearActiveTask(executorId: string): void;
+
+/** Recover active task from GitHub (query claimed-by:<id> issues) */
+export async function recoverStateFromGitHub(config: Config): Promise<ExecutorState>;
+```
+
+State file: `/workspace/state/executor/<executorId>/state.json`.
+GitHub is the source of truth. The local file is a fast-path optimization.
+
+### src/signing.ts — signing validation
+
+```typescript
+/** Validate that signing was properly set up by entrypoint.sh.
+ *  Checks GPG key availability or SSH key file existence.
+ *  Throws on failure when signing is enabled. */
+export async function validateSigningSetup(config: Config): Promise<void>;
+```
+
+Does NOT do the actual import — that's `entrypoint.sh`'s job.
+
+## 9) Planner loop
+
+`src/planner.ts` — two-phase invocation per cycle.
+
+```typescript
+export async function runPlannerLoop(config: Config, logger: Logger): Promise<never>;
+```
+
+### Algorithm
+
+```
+loop forever:
+  try:
+    syncRepo(config)
+
+    // Phase 1: Plan creation
+    features = listIssues(config, ['feature', 'needs-plan'])
+    if features.length > 0:
+      prompt = buildPlannerPrompt(config, features)
+      invokeClaude({
+        prompt,
+        systemPromptFile: '/opt/agent/prompts/plan.md',
+        maxTurns: config.maxTurnsPerRun,
+        outputFormat: 'text',
+        workingDirectory: '/workspace/repo',
+      })
+
+    // Phase 2: Task decomposition
+    readyPlans = listIssues(config, ['plan:ready'])
+    plansNeedingTasks = readyPlans.filter(p => !p.labels.includes('plan:tasks-created'))
+    if plansNeedingTasks.length > 0:
+      prompt = buildTaskDecompPrompt(config, plansNeedingTasks)
+      invokeClaude({
+        prompt,
+        systemPromptFile: '/opt/agent/prompts/tasks.md',
+        maxTurns: config.maxTurnsPerRun,
+        outputFormat: 'text',
+        workingDirectory: '/workspace/repo',
+      })
+
+  catch error:
+    logger.error('Planner iteration failed', { error })
+
+  sleep(config.pollIntervalSeconds * 1000)
+```
+
+### Prompt builders
+
+```typescript
+function buildPlannerPrompt(config: Config, features: GitHubIssue[]): string {
+  const featureList = features
+    .map(f => `- #${f.number}: ${f.title}`)
+    .join('\n');
+  return `You are the Planner agent for repository ${config.repoSlug}.
+Working directory: /workspace/repo (synced to ${config.baseBranch})
+
+The following feature issues need plans:
+${featureList}
+
+Process each feature. Use \`gh\` for all GitHub API operations.
+Repository: ${config.repoSlug}`;
+}
+
+function buildTaskDecompPrompt(config: Config, plans: GitHubIssue[]): string {
+  const planList = plans
+    .map(p => `- #${p.number}: ${p.title}`)
+    .join('\n');
+  return `You are the Planner agent for repository ${config.repoSlug}.
+Working directory: /workspace/repo (synced to ${config.baseBranch})
+
+The following approved plans need task decomposition:
+${planList}
+
+Create task issues for each plan. Use \`gh\` for all GitHub API operations.
+Repository: ${config.repoSlug}`;
+}
+```
+
+## 10) Executor loop
+
+`src/executor.ts` — manages the full task lifecycle.
+
+```typescript
+export async function runExecutorLoop(config: Config, logger: Logger): Promise<never>;
+```
+
+### Algorithm
+
+```
+loop forever:
+  try:
+    syncRepo(config)
+
+    // --- Phase 0: Recovery / Resume ---
+    state = readExecutorState(config.executorId)
+    if state is null:
+      state = recoverStateFromGitHub(config)
+      if state.activeTaskId:
+        writeExecutorState(config.executorId, state)
+        logger.info('Recovered active task from GitHub', { taskId: state.activeTaskId })
+
+    // --- Phase 1: Claim if idle ---
+    if state.activeTaskId is null:
+      tasks = listIssues(config, ['task', 'todo'])
+      if tasks.length === 0:
+        logger.info('No tasks available. Sleeping.')
+        sleep; continue
+
+      claim = claimTask(config, tasks[0].number)
+      if !claim.success:
+        logger.warn('Claim failed, another executor won')
+        sleep; continue
+
+      state = { activeTaskId: claim.taskId, sessionId: null }
+      writeExecutorState(config.executorId, state)
+
+    // --- Phase 2: Setup worktree ---
+    task = getIssue(config, state.activeTaskId)
+    branch = makeBranchName(state.activeTaskId, task.title)
+    worktreePath = ensureWorktree(config, state.activeTaskId, branch)
+    postWorkMapping(config, state.activeTaskId, branch, worktreePath)
+
+    // --- Phase 3: Implementation ---
+    prompt = buildExecutorPrompt(config, task, branch, worktreePath)
+    result = invokeClaude({
+      prompt,
+      systemPromptFile: '/opt/agent/prompts/exec.md',
+      maxTurns: config.maxTurnsPerRun,
+      outputFormat: 'json',
+      workingDirectory: worktreePath,
+      resumeSessionId: state.sessionId,
+    })
+    if result.sessionId:
+      state.sessionId = result.sessionId
+      writeExecutorState(config.executorId, state)
+
+    // --- Phase 4: PR monitoring ---
+    pr = findPRByBranch(config, branch)
+    if pr is null:
+      logger.info('No PR yet, will continue next iteration')
+      sleep; continue
+
+    postWorkMapping(config, state.activeTaskId, branch, worktreePath, pr.number)
+    prStatus = getPRStatus(config, pr.number)
+
+    switch prStatus:
+      case 'mergeable':
+        mergePR(config, pr.number)
+        editIssueLabels(config, state.activeTaskId, ['done'], ['in-progress', `claimed-by:${config.executorId}`])
+        closeIssue(config, state.activeTaskId)
+        clearActiveTask(config.executorId)
+        state = { activeTaskId: null, sessionId: null }
+
+      case 'failing':
+        // --- Phase 5: Review loop ---
+        runReviewLoop(config, logger, state, task, pr, worktreePath)
+
+      case 'pending':
+        logger.info('Checks pending, will re-check next iteration')
+
+      case 'conflicting':
+        logger.warn('Merge conflicts detected')
+
+  catch error:
+    logger.error('Executor iteration failed', { error })
+
+  sleep(config.pollIntervalSeconds * 1000)
+```
+
+### Review loop (CI failure recovery)
+
+When CI fails, a dedicated review phase invokes Claude with `prompts/review.md`:
+
+```typescript
+async function runReviewLoop(
+  config: Config, logger: Logger, state: ExecutorState,
+  task: GitHubIssue, pr: GitHubPR, worktreePath: string,
+): Promise<void> {
+  const MAX_REVIEW_ATTEMPTS = 3;
+
+  for (let attempt = 0; attempt < MAX_REVIEW_ATTEMPTS; attempt++) {
+    const checkDetails = await getPRCheckDetails(config, pr.number);
+    const prompt = buildReviewPrompt(config, task, pr, checkDetails);
+
+    await invokeClaude({
+      prompt,
+      systemPromptFile: '/opt/agent/prompts/review.md',
+      maxTurns: config.maxTurnsPerRun,
+      outputFormat: 'text',
+      workingDirectory: worktreePath,
+    });
+
+    await pushBranch(worktreePath);
+
+    // Poll for CI completion (up to 10 minutes)
+    const newStatus = await pollForCIResult(config, pr.number, 10 * 60 * 1000);
+
+    if (newStatus === 'mergeable') return;
+    if (newStatus === 'failing') continue;
+  }
+
+  // Exhausted attempts — mark as blocked
+  await addComment(config, task.number,
+    `CI failures could not be resolved after ${MAX_REVIEW_ATTEMPTS} review attempts. Marking as blocked.`
+  );
+  await editIssueLabels(config, task.number, ['blocked'], ['in-progress']);
+}
+```
+
+### Prompt builders
+
+```typescript
+function buildExecutorPrompt(
+  config: Config, task: GitHubIssue, branch: string, worktreePath: string,
+): string {
+  const validation = config.validationCommand
+    ? `Validation command: ${config.validationCommand}`
+    : 'No validation command configured.';
+  return `You are the Executor agent for repository ${config.repoSlug}.
+Working directory: ${worktreePath} (branch: ${branch})
+Task issue: #${task.number} — ${task.title}
 
 Task description:
-${body}
+${task.body}
 
-Implement the changes described in this task.
-EOF
+${validation}
+
+Implement the changes described in this task.`;
+}
+
+function buildReviewPrompt(
+  config: Config, task: GitHubIssue, pr: GitHubPR, checkDetails: string,
+): string {
+  return `You are the Executor agent reviewing CI failures for repository ${config.repoSlug}.
+Task: #${task.number} — ${task.title}
+PR: #${pr.number}
+
+The following CI checks have failed:
+${checkDetails}
+
+Diagnose the failures and fix the code.`;
 }
 ```
 
@@ -490,19 +937,18 @@ EOF
 
 These are the most important files in the project. They tell Claude what to do.
 
-### prompts/planner.md
+### prompts/plan.md
 
 ```markdown
-# Planner Agent Instructions
+# Planner Agent Instructions — Plan Creation
 
-You are the planning agent. Your job is to turn feature requests into actionable plans
-and decompose approved plans into individual task issues.
+You are the planning agent. Your job is to turn feature requests into actionable plans.
 
-## Per feature issue (labeled "feature" + "needs-plan"):
+## For each feature issue (labeled "feature" + "needs-plan"):
 
-### Step 1 — Check for existing plan
-Search for an issue titled "Plan: <feature title>" or with metadata block
-containing `source_feature: <number>`. If it exists, reuse it.
+### Step 1 — Search for existing plan
+Search for an issue with metadata `source_feature: <feature_number>`.
+If found, update it instead of creating a new one.
 
 ### Step 2 — Create or update the plan issue
 - Title: "Plan: <feature title>"
@@ -514,37 +960,62 @@ containing `source_feature: <number>`. If it exists, reuse it.
   - Metadata block (see format below)
 
 ### Step 3 — Assess plan readiness
-- If you need human input to proceed, add label `plan:needs-clarification`
-  and comment explaining what you need. Stop processing this feature.
+- If you need human input, add label `plan:needs-clarification`
+  and comment explaining what you need. Stop.
 - If the plan is clear and complete, add label `plan:ready`.
-
-### Step 4 — Create task issues (only when plan has `plan:ready`)
-For each checklist item in the plan:
-- Create an issue titled "Task: <description>"
-- Labels: `task`, `todo`
-- Body: detailed requirements, relevant file paths, acceptance criteria
-- Include metadata block linking back to the plan issue
-After all tasks created:
-- Update plan label to `plan:tasks-created`
-- Update feature issue: remove `needs-plan`, add `planned`
-- Update plan checklist items with links to created task issues
 
 ## Metadata block format
 Embed this HTML comment in every issue you create:
 <!-- agent-meta
-entity: plan|task
+entity: plan
 source_feature: <feature_issue_number>
-source_plan: <plan_issue_number>  (tasks only)
 -->
 
 ## Rules
-- NEVER create duplicate plans or tasks. Always search first.
+- NEVER create duplicate plans. Always search first.
 - Use `gh issue list`, `gh issue create`, `gh issue edit`, `gh issue view`.
-- Read the codebase to make informed plans. Use `find`, `cat`, `grep` as needed.
-- Keep plans concrete and implementable — reference specific files and functions.
+- Read the codebase to make informed plans.
+- Keep plans concrete — reference specific files and functions.
 ```
 
-### prompts/executor-implement.md
+### prompts/tasks.md
+
+```markdown
+# Planner Agent Instructions — Task Decomposition
+
+You are the planning agent. Your job is to decompose approved plans into task issues.
+
+## For each plan issue (labeled "plan:ready" but NOT "plan:tasks-created"):
+
+### Step 1 — Read the plan
+Read the plan issue body. Understand each checklist item.
+
+### Step 2 — Create task issues
+For each checklist item:
+- Create an issue titled "Task: <description>"
+- Labels: `task`, `todo`
+- Body: detailed requirements, relevant file paths, acceptance criteria
+- Include metadata block linking to plan and feature
+
+### Step 3 — Update plan issue
+- Update checklist items with links to created task issues
+- Add label `plan:tasks-created`
+- On the source feature issue: remove `needs-plan`, add `planned`
+
+## Metadata block format
+<!-- agent-meta
+entity: task
+source_feature: <feature_issue_number>
+source_plan: <plan_issue_number>
+-->
+
+## Rules
+- NEVER create duplicate tasks. Search by metadata first, title second.
+- Each task should be independently implementable.
+- Tasks should be ordered by dependency (independent tasks first).
+```
+
+### prompts/exec.md
 
 ```markdown
 # Executor Agent Instructions
@@ -553,54 +1024,79 @@ You are the executor agent. You implement code changes for a single task.
 
 ## Your environment
 - You are in a git worktree checked out to a feature branch
-- The branch is based on the latest main branch
+- The branch is based on the latest base branch
 - You have full access to the codebase
 
 ## Your job
 1. Read and understand the task requirements (provided in the prompt)
 2. Read relevant source files to understand existing code
 3. Implement the required changes
-4. Run validation if a command is specified: ${VALIDATION_COMMAND}
-5. If validation fails, fix the issues and retry
-6. Stage and commit your changes with a clear conventional commit message
+4. Run validation if a command is specified in the prompt
+5. If validation fails, fix the issues and retry (up to 3 attempts)
+6. Stage and commit your changes with conventional commit messages
 7. Push the branch: `git push -u origin HEAD`
 8. Create a PR (or update existing) using `gh pr create`:
    - Title: concise description of the change
    - Body: what changed, why, link to task issue (#<number>)
-   - Labels: `task:<task_id>`
+   - Add label `task:<task_id>`
 
 ## Rules
-- Make focused, minimal changes. Don't refactor unrelated code.
-- Write code that matches the existing style and conventions.
-- Commit messages: use conventional commits (feat:, fix:, refactor:, etc.)
-- If you're stuck or the task is unclear, comment on the issue explaining
-  what's blocking you and stop.
+- Make focused, minimal changes. Do not refactor unrelated code.
+- Match existing code style and conventions.
+- Use conventional commits (feat:, fix:, refactor:, etc.)
+- If stuck or task is unclear, comment on the issue and stop.
 - Do NOT merge the PR. The orchestrator handles merging.
-- Do NOT modify labels. The orchestrator handles label transitions.
+- Do NOT modify workflow labels. The orchestrator handles label transitions.
+```
+
+### prompts/review.md
+
+```markdown
+# Review Agent Instructions
+
+You are reviewing CI failures for a pull request.
+
+## Your environment
+- You are in the worktree for the task branch
+- CI checks have failed on the PR
+- Failure details are provided in the prompt
+
+## Your job
+1. Read and understand the CI failure output
+2. Identify the root cause in the code
+3. Fix the failing code
+4. Run the validation command locally if available
+5. Stage and commit the fix: `fix: address CI failure — <description>`
+6. Do NOT push — the orchestrator will push for you
+
+## Rules
+- Focus only on fixing what CI flagged. Do not add features.
+- If the failure is in test infrastructure (not your code), comment on the PR and stop.
+- If you cannot determine the cause, comment on the PR explaining what you tried.
 ```
 
 ## 12) Label protocol
-
-Same as the user's original draft, kept minimal:
 
 | Label | Applied by | Meaning |
 |-------|-----------|---------|
 | `feature` | Human | This issue is a feature request |
 | `needs-plan` | Human | Feature needs a plan |
 | `planned` | Planner | Plan and tasks created |
+| `in-execution` | Executor (TS) | Feature has at least one task in progress (optional) |
+| `done` | Executor (TS) | Feature/task complete |
 | `plan:draft` | Planner | Plan exists, not yet approved |
 | `plan:needs-clarification` | Planner | Human input needed |
 | `plan:ready` | Human/Planner | Plan approved, tasks can be created |
 | `plan:tasks-created` | Planner | All task issues created |
 | `task` | Planner | This issue is an implementation task |
 | `todo` | Planner | Task available for claiming |
-| `in-progress` | Executor (bash) | Task claimed and being worked on |
-| `claimed-by:<id>` | Executor (bash) | Which executor owns this task |
-| `done` | Executor (bash) | Task complete, PR merged |
-| `blocked` | Executor | Task needs human intervention |
+| `in-progress` | Executor (TS) | Task claimed and being worked on |
+| `claimed-by:<id>` | Executor (TS) | Which executor owns this task |
+| `done` | Executor (TS) | Task complete, PR merged |
+| `blocked` | Executor (TS) | Task needs human intervention |
+| `needs-human` | Planner/Executor | Requires human attention (broader than `blocked`) |
 
-Labels are created automatically if missing. The entrypoint or first loop iteration
-can call `gh label create` with `--force` for each required label.
+Labels are auto-created on first loop iteration via `gh label create --force`.
 
 ## 13) Cost and safety controls
 
@@ -608,9 +1104,10 @@ can call `gh label create` with `--force` for each required label.
 - `--max-turns N`: caps how many tool calls Claude makes per run
   - Planner: 30 turns (enough to process several features)
   - Executor: 50 turns (implementation may need many file edits)
-- These are configurable via `MAX_TURNS_PER_RUN` env var
+- Configurable via `MAX_TURNS_PER_RUN` env var
+- 30-minute timeout per Claude invocation (hard kill)
 
-### Rate limiting (bash)
+### Rate limiting
 - Planner sleeps 2 minutes between runs by default
 - Executor sleeps 1 minute between runs by default
 - When no work is available, both skip the Claude invocation entirely (free)
@@ -620,32 +1117,53 @@ can call `gh label create` with `--force` for each required label.
 - Executor prompt: "Make focused, minimal changes."
 - Both: if stuck, comment and stop rather than looping
 
+### Safety controls (v1)
+- Review loop: max 3 attempts per CI failure, then mark `blocked`
+- Circuit breaker: if the same task fails 3 consecutive iterations, mark `blocked`
+- Graceful shutdown: SIGTERM handler finishes current operation before exiting
+
 ### Future additions (not v1)
 - `--max-budget-usd` per invocation
-- Hourly call counter (like ralph-claude-code's rate limiter)
-- Circuit breaker for repeated failures
+- Hourly call counter / rate limiter
 
-## 14) GPG signing from Windows
+## 14) Commit signing (GPG / SSH)
 
-The user's GPG keys live on a Windows host. The entrypoint handles this:
+Signing is controlled by `GIT_COMMIT_SIGNING` (default: `off`).
 
-1. Export armored private key on Windows:
-   `gpg --armor --export-secret-keys <KEY_ID> > secrets/gpg_private_key.asc`
+### Modes
 
-2. The file is mounted via Docker secrets into `/run/secrets/gpg_private_key`
+| Mode | `GIT_COMMIT_SIGNING` | `GIT_SIGNING_KEY` | Key files in mount |
+|------|---------------------|-------------------|--------------------|
+| Off | `off` | not needed | none |
+| GPG | `gpg` | key ID / fingerprint | `gpg_private_key.asc` |
+| SSH | `ssh` | (auto-configured) | `ssh_signing_key` + `ssh_signing_key.pub` |
 
-3. `entrypoint.sh` strips Windows CRLF (`tr -d '\r'`) before `gpg --batch --import`
+### Key handling (Windows-safe)
 
-4. Git is configured with `commit.gpgsign=true` and the key ID
+Signing keys are **mounted** from the host at `/mnt/host-keys` (read-only) and
+**copied** into container-owned paths with proper permissions. Keys are never used
+in-place from the mount — mounted volumes on Windows cannot represent Linux
+permissions correctly.
 
-5. For passphrase-protected keys, `gpg-agent` with `--pinentry-mode loopback`
-   and `--passphrase-file` can be configured. For simplicity, v1 recommends
-   using a key without passphrase inside the container (the key file itself
-   is the secret boundary).
+The copy-then-chmod pattern in `entrypoint.sh`:
 
-Known gotcha: if the exported `.asc` file was opened/saved in a Windows text editor,
-it may have BOM bytes or CRLF corruption. The `tr -d '\r'` handles CRLF.
-If import still fails, check for BOM: `sed -i '1s/^\xEF\xBB\xBF//' "$KEY_FILE"`.
+1. Mount keys read-only at `/mnt/host-keys`
+2. Copy into `~/.gnupg/` (GPG) or `~/.ssh/` (SSH)
+3. `chmod 700` directories, `chmod 600` private keys
+4. Import (GPG) or configure git (SSH)
+
+### GPG from Windows
+
+1. Export: `gpg --armor --export-secret-keys <KEY_ID> > secrets/gpg_private_key.asc`
+2. Entrypoint strips CRLF (`tr -d '\r'`) and BOM before import
+3. For passphrase-protected keys: v1 recommends using a key without passphrase
+   (the mounted file itself is the secret boundary)
+
+### SSH signing
+
+1. Export: copy your SSH key pair to `secrets/ssh_signing_key` + `secrets/ssh_signing_key.pub`
+2. Entrypoint configures: `git config gpg.format ssh` + `user.signingkey` pointing to the public key
+3. GitHub must have the corresponding public key registered for signature verification
 
 ## 15) State management
 
@@ -656,75 +1174,95 @@ convenience — the system must recover if state files are lost.
 
 | File | Purpose | Recovery if lost |
 |------|---------|-----------------|
-| `executor/<id>/active_task` | Currently claimed task ID | Re-query `gh issue list -l "claimed-by:<id>"` |
-| `executor/<id>/session_<n>` | Claude session ID for resume | Starts fresh session (loses context, not data) |
+| `executor/<id>/state.json` | Active task ID + Claude session ID | Re-query `gh issue list -l "claimed-by:<id>"` |
 | `planner.log` | Planner output log | Informational only |
 | `executor/<id>/run_<n>.log` | Executor run logs | Informational only |
 
 ### Recovery after restart
 
-1. Executor starts, finds no `active_task` file
-2. Queries GitHub for issues labeled `in-progress + claimed-by:<EXECUTOR_ID>`
+Implemented in `recoverStateFromGitHub()`:
+
+1. Executor starts, checks local `state.json`
+2. If missing or empty, queries GitHub for issues labeled `in-progress + claimed-by:<EXECUTOR_ID>`
 3. If found: writes task ID to state file, resumes work
 4. If not found: proceeds to claim new task
 
-This means the executor loop's first action should check GitHub for existing claims,
-not just the local state file. The state file is a fast-path optimization.
+### Machine-readable comments
+
+The executor posts structured comments on task issues to record operational state:
+
+```html
+<!-- work-mapping
+executor: executor-01
+branch: task/42-add-login
+worktree: /workspace/worktrees/42
+pr: 56
+-->
+```
+
+This enables tracing task → branch → PR relationships from GitHub alone.
 
 ## 16) Implementation order
 
-### Step 1: Dockerfile + entrypoint
-Build the image, verify Claude Code runs in `-p` mode, verify `gh` auth works,
-verify GPG import works. This is the foundation — nothing else works without it.
+### Step 1: Project scaffold
+`package.json`, `tsconfig.json`, `src/types.ts`, `src/config.ts`, `src/logger.ts`,
+stub `src/index.ts` that loads config and logs it.
 
-**Acceptance: `docker run ... claude -p "echo hello" --dangerously-skip-permissions` works.**
+**Acceptance: `npx tsc` compiles. `node dist/index.js planner` logs parsed config.**
 
-### Step 2: lib.sh + planner-loop.sh
-Implement `sync_repo` and the planner outer loop. Start with a minimal planner prompt.
-Test against a real repo with a feature issue.
+### Step 2: Git + GitHub wrappers
+`src/git.ts`, `src/github.ts`. Test `syncRepo`, `ensureWorktree`, `listIssues`,
+`ensureLabels`, `claimTask` against a real repo.
 
-**Acceptance: Planner creates a plan issue from a feature request.**
+**Acceptance: wrapper functions work end-to-end against a test repository.**
 
-### Step 3: Planner prompt refinement
-Iterate on `prompts/planner.md` until plans are useful and tasks are well-scoped.
-This is prompt engineering, not code — test by running the planner repeatedly.
+### Step 3: Claude wrapper
+`src/claude.ts`. Test with simple prompts.
 
-**Acceptance: Plan → tasks flow works end-to-end. No duplicates on re-runs.**
+**Acceptance: `invokeClaude({ prompt: 'say hello', ... })` returns a `ClaudeResult`.**
 
-### Step 4: executor-loop.sh
-Implement the executor loop: claim, worktree, Claude invocation, PR monitoring.
-Start with a simple task (e.g., "add a comment to file X").
+### Step 4: Entrypoint + Dockerfile
+`scripts/entrypoint.sh`, `Dockerfile`. Verify build, credential setup, Node.js startup.
 
-**Acceptance: Executor claims a task, creates a branch, commits, opens a PR.**
+**Acceptance: `docker run ... planner` starts, logs "Agent starting", `gh auth status` succeeds.**
 
-### Step 5: Executor prompt refinement
-Iterate on `prompts/executor-implement.md` until code quality is acceptable.
-Test with progressively harder tasks.
+### Step 5: State + signing
+`src/state.ts`, `src/signing.ts`.
 
-**Acceptance: Executor produces mergeable PRs for real tasks.**
+**Acceptance: State round-trips correctly. Signing validation detects import status.**
 
-### Step 6: docker-compose.yml + end-to-end
-Wire up both services with shared volumes. Run the full flow:
-feature issue → plan → tasks → implementation → PR → merge.
+### Step 6: Planner loop
+`src/planner.ts`, `prompts/plan.md`, `prompts/tasks.md`.
 
-**Acceptance: Human creates a feature issue, walks away, comes back to merged PRs.**
+**Acceptance: Feature issue → plan issue → task issues. No duplicates on re-runs.**
 
-### Step 7: Hardening
-- Add label auto-creation
-- Add recovery-from-restart logic
-- Add logging/observability
-- Test GPG signing end-to-end with Windows-exported keys
+### Step 7: Executor loop
+`src/executor.ts`, `prompts/exec.md`, `prompts/review.md`.
+
+**Acceptance: Task → branch → commit → PR. CI failure → review → fix → merge.**
+
+### Step 8: Docker Compose + end-to-end
+`docker-compose.yml`, `.env.example`.
+
+**Acceptance: `docker compose up` runs full flow. Human creates feature, walks away, comes back to merged PRs.**
+
+### Step 9: Hardening
+- Retry logic with exponential backoff for `gh` and `git` calls
+- Circuit breaker for repeated task failures
+- Graceful SIGTERM shutdown
+- Recovery-from-restart tests
+- GPG + SSH signing end-to-end with Windows-exported keys
 
 ## 17) What this plan does NOT include (and why)
 
 | Omitted | Reason |
 |---------|--------|
-| Python codebase | Bash + Claude + gh is sufficient. No custom adapters needed. |
+| Bash control plane | TypeScript provides type safety, better error handling, and testability. Bash only for OS plumbing in entrypoint. |
 | Custom GitHub client | `gh` CLI does everything we need. |
 | Custom git client | `git` CLI does everything we need. |
 | Contract tests | The prompts are the contract. Test by running the system. |
-| 6 milestones | 7 steps, each testable independently. |
-| Multi-executor support | v1 is single executor. Label-based claiming works for one. |
+| Multi-executor support | v1 is single executor. Nonce-based claiming is ready for multi-executor when needed. |
 | Webhook/event queue | Polling is the explicit design choice. |
 | Playwright/browsers | Not needed — agents work with code and CLI tools only. |
 | Custom idempotency engine | Prompts instruct Claude to search before creating. `gh` queries are the idempotency check. |
+| `ANTHROPIC_API_KEY` env var | Using mounted `.credentials.json` for Claude auth. |

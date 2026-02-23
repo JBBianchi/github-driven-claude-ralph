@@ -12,6 +12,8 @@
   - Sensitive values must be runtime-injected secrets, never image-baked.
 
 - KEY ASSUMPTIONS:
+  - Most non-language workflow semantics can be preserved regardless of Bash vs TypeScript control plane.
+  - User wants conflict resolution advice, not immediate code migration.
   - v1 uses a single target repository per deployment.
   - A label taxonomy can be created/normalized by bootstrap code.
   - Merge action is driven via GitHub API and repository branch protection rules.

@@ -16,17 +16,17 @@
 - ALTERNATIVES: Branching directly in base checkout.
 - CONSEQUENCES: Need robust worktree garbage-collection and corruption-recovery routines.
 
-- DECISION: Secrets are runtime-only via env vars and mounted files (`/run/secrets` + `~/.claude/.credentials.json`), never image build args.
-- DATE: 2026-02-22
-- RATIONALE: Reduces leakage risk and supports local/server parity.
-- ALTERNATIVES: Build-time ARGs or committed config files.
-- CONSEQUENCES: Strong startup validation needed with clear fatal errors on missing secrets.
+- DECISION: Tokens and sensitive credentials MUST use Docker Compose secrets (`secrets:` block), never plain environment variables. GH_TOKEN is sourced via `secrets: environment: GH_TOKEN`. Claude credentials via mounted file. Build-time secrets (if ever needed) must use BuildKit `--mount=type=secret`. No secrets baked into the image.
+- DATE: 2026-02-23
+- RATIONALE: Plain env vars are visible in `docker inspect`, process listings, and logs. Docker secrets are mounted as tmpfs files at `/run/secrets/` and are not exposed in container metadata.
+- ALTERNATIVES: Plain env vars (rejected — insecure), build-time ARGs (rejected — baked into layers).
+- CONSEQUENCES: Entrypoint reads token from `/run/secrets/GH_TOKEN`. Strong startup validation needed with clear fatal errors on missing secrets.
 
-- DECISION: Use Claude Code runtime with mounted `~/.claude/.credentials.json` for both planner and executor.
-- DATE: 2026-02-22
-- RATIONALE: Matches deployment requirement and avoids introducing parallel provider complexity in v1.
-- ALTERNATIVES: Anthropic API-only or hybrid provider mode.
-- CONSEQUENCES: Container startup must validate credential file presence and readable permissions.
+- DECISION: Use Claude Code runtime with mounted `~/.claude/.credentials.json` for both planner and executor. ANTHROPIC_API_KEY env var is NOT used.
+- DATE: 2026-02-23
+- RATIONALE: Matches deployment requirement and avoids introducing parallel provider complexity in v1. Credentials file supports Claude's auth flow.
+- ALTERNATIVES: ANTHROPIC_API_KEY env var, hybrid provider mode.
+- CONSEQUENCES: Container startup must validate credential file presence and readable permissions. Mount must be configured in docker-compose.
 
 - DECISION: Executor auto-merges when configured merge gates pass.
 - DATE: 2026-02-22
@@ -34,11 +34,11 @@
 - ALTERNATIVES: Human-only merge.
 - CONSEQUENCES: Merge-gate logic must exactly mirror repository policy to avoid unsafe merges.
 
-- DECISION: GPG signing is toggleable; when enabled, missing/invalid signing setup is fatal.
-- DATE: 2026-02-22
-- RATIONALE: Supports both strict compliance workflows and simpler local runs.
-- ALTERNATIVES: Always sign or best-effort with warning.
-- CONSEQUENCES: Requires explicit startup self-test for GPG key import and signing capability.
+- DECISION: Commit signing is a tri-state toggle (`GIT_COMMIT_SIGNING=off|gpg|ssh`); when enabled, missing/invalid signing setup is fatal. Signing keys are mounted read-only and copied to container-owned paths (Windows compatibility).
+- DATE: 2026-02-23
+- RATIONALE: GPG and SSH are both supported by GitHub for verified commits. SSH is simpler and avoids gpg-agent headaches. Copy-then-chmod handles Windows mount permission issues.
+- ALTERNATIVES: GPG-only boolean toggle, always sign, best-effort with warning.
+- CONSEQUENCES: Requires explicit startup self-test for key import. Entrypoint handles key copy/import for both GPG and SSH.
 
 - DECISION: v1 deployment scope is one isolated executor per repo/host.
 - DATE: 2026-02-22
@@ -51,3 +51,9 @@
 - RATIONALE: Reduces manual setup friction and avoids failed bootstraps in fresh repos.
 - ALTERNATIVES: Fail-fast when labels are missing.
 - CONSEQUENCES: Bootstrap requires idempotent label reconciliation.
+
+- DECISION: Dedicated review loop with separate prompt (review.md) for CI failure diagnosis.
+- DATE: 2026-02-23
+- RATIONALE: CI failure interpretation is a distinct cognitive task from implementation. Separate prompt keeps focus tight. Max 3 attempts before marking blocked.
+- ALTERNATIVES: Re-run full executor prompt (original plan).
+- CONSEQUENCES: Adds a review phase to executor loop. Requires getPRCheckDetails() in github.ts.
