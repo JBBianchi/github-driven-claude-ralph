@@ -1,0 +1,60 @@
+services:
+  planner:
+    build: .
+    command: ["planner"]
+    restart: unless-stopped
+    environment:
+      REPO_URL: ${REPO_URL}
+      REPO_SLUG: ${REPO_SLUG}
+      BASE_BRANCH: ${BASE_BRANCH:-main}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL}
+      PLANNER_POLL_INTERVAL_SECONDS: ${PLANNER_POLL_INTERVAL_SECONDS:-120}
+      MAX_TURNS_PER_RUN: ${PLANNER_MAX_TURNS:-30}
+      GIT_COMMIT_SIGNING: ${GIT_COMMIT_SIGNING:-off}
+      GIT_SIGNING_KEY: ${GIT_SIGNING_KEY:-}
+      SIGNING_KEYS_MOUNT: /mnt/host-keys
+    secrets:
+      - GH_TOKEN
+    volumes:
+      - repo_data:/workspace/repo
+      - state_data:/workspace/state
+      - ./logs:/workspace/logs
+      - ${CLAUDE_CREDENTIALS_FILE}:/home/agent/.claude/.credentials.json:ro
+      - ${SIGNING_KEYS_PATH:-./secrets}:/mnt/host-keys:ro
+
+  executor:
+    build: .
+    command: ["executor"]
+    restart: unless-stopped
+    environment:
+      REPO_URL: ${REPO_URL}
+      REPO_SLUG: ${REPO_SLUG}
+      BASE_BRANCH: ${BASE_BRANCH:-main}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL}
+      EXECUTOR_ID: ${EXECUTOR_ID:-executor-01}
+      EXECUTOR_POLL_INTERVAL_SECONDS: ${EXECUTOR_POLL_INTERVAL_SECONDS:-60}
+      MAX_TURNS_PER_RUN: ${EXECUTOR_MAX_TURNS:-50}
+      VALIDATION_COMMAND: ${VALIDATION_COMMAND:-}
+      GIT_COMMIT_SIGNING: ${GIT_COMMIT_SIGNING:-off}
+      GIT_SIGNING_KEY: ${GIT_SIGNING_KEY:-}
+      SIGNING_KEYS_MOUNT: /mnt/host-keys
+    secrets:
+      - GH_TOKEN
+    volumes:
+      - repo_data:/workspace/repo
+      - worktrees_data:/workspace/worktrees
+      - state_data:/workspace/state
+      - ./logs:/workspace/logs
+      - ${CLAUDE_CREDENTIALS_FILE}:/home/agent/.claude/.credentials.json:ro
+      - ${SIGNING_KEYS_PATH:-./secrets}:/mnt/host-keys:ro
+
+volumes:
+  repo_data:
+  worktrees_data:
+  state_data:
+
+secrets:
+  GH_TOKEN:
+    environment: GH_TOKEN
