@@ -11,6 +11,7 @@ import {
   closeIssue,
   postWorkMapping,
   addComment,
+  requestCopilotReview,
 } from '../../src/github.js';
 import { invokeClaude } from '../../src/claude.js';
 import {
@@ -46,6 +47,7 @@ vi.mock('../../src/github.js', () => ({
   closeIssue: vi.fn(),
   postWorkMapping: vi.fn(),
   addComment: vi.fn(),
+  requestCopilotReview: vi.fn(),
 }));
 
 vi.mock('../../src/claude.js', () => ({
@@ -73,6 +75,7 @@ const mockEditIssueLabels = vi.mocked(editIssueLabels);
 const mockCloseIssue = vi.mocked(closeIssue);
 const mockPostWorkMapping = vi.mocked(postWorkMapping);
 const mockAddComment = vi.mocked(addComment);
+const mockRequestCopilotReview = vi.mocked(requestCopilotReview);
 const mockInvokeClaude = vi.mocked(invokeClaude);
 const mockReadExecutorState = vi.mocked(readExecutorState);
 const mockWriteExecutorState = vi.mocked(writeExecutorState);
@@ -138,6 +141,7 @@ describe('runExecutorIteration', () => {
     mockCloseIssue.mockResolvedValue(undefined);
     mockAddComment.mockResolvedValue(undefined);
     mockMergePR.mockResolvedValue(undefined);
+    mockRequestCopilotReview.mockResolvedValue(true);
     mockWriteExecutorState.mockReturnValue(undefined);
     mockClearActiveTask.mockReturnValue(undefined);
   });
@@ -301,6 +305,18 @@ describe('runExecutorIteration', () => {
 
     expect(mockFindPRByBranch).toHaveBeenCalledWith(expect.anything(), 'task/42-add-button');
     expect(mockGetPRStatus).toHaveBeenCalledWith(expect.anything(), 56);
+  });
+
+  it('requests Copilot review when PR is found', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(makePR());
+    mockGetPRStatus.mockResolvedValue('mergeable');
+
+    await runExecutorIteration(makeConfig(), makeLogger());
+
+    expect(mockRequestCopilotReview).toHaveBeenCalledWith(expect.anything(), 56);
   });
 
   it('returns early when no PR exists yet', async () => {

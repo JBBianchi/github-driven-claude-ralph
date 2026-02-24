@@ -96,6 +96,17 @@ describe('syncRepo', () => {
 
     await expect(syncRepo(makeConfig())).rejects.toThrow('fatal: remote not found');
   });
+
+  it('propagates fetch error without falling through to clone', async () => {
+    // rev-parse succeeds (repo exists)
+    mockExeca.mockResolvedValueOnce({ stdout: '.git', stderr: '', exitCode: 0 } as any);
+    // fetch fails (network issue)
+    mockExeca.mockRejectedValueOnce(new Error('fatal: unable to access remote'));
+
+    await expect(syncRepo(makeConfig())).rejects.toThrow('fatal: unable to access remote');
+    // Should NOT attempt clone — only 2 calls (rev-parse + fetch)
+    expect(mockExeca).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('ensureWorktree', () => {

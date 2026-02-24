@@ -10,6 +10,7 @@ import {
   closeIssue,
   postWorkMapping,
   addComment,
+  requestCopilotReview,
 } from './github.js';
 import { invokeClaude } from './claude.js';
 import {
@@ -203,6 +204,7 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     }
 
     await postWorkMapping(config, state.activeTaskId!, branch, worktreePath, pr.number);
+    await requestCopilotReview(config, pr.number);
     const prStatus = await getPRStatus(config, pr.number);
 
     switch (prStatus) {

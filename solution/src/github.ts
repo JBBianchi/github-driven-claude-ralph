@@ -124,7 +124,13 @@ export async function ensureLabels(config: Config): Promise<void> {
     (JSON.parse(stdout) as Array<{ name: string }>).map((l) => l.name),
   );
 
-  for (const label of WORKFLOW_LABELS) {
+  // Static workflow labels + dynamic claimed-by label for this executor
+  const labels = [...WORKFLOW_LABELS];
+  if (config.role === 'executor') {
+    labels.push(`claimed-by:${config.executorId}`);
+  }
+
+  for (const label of labels) {
     if (!existing.has(label)) {
       await gh([
         'label', 'create', label,
@@ -320,4 +326,18 @@ export async function closeIssue(config: Config, issueNumber: number): Promise<v
     'issue', 'close', String(issueNumber),
     '--repo', config.repoSlug,
   ]);
+}
+
+export async function requestCopilotReview(config: Config, prNumber: number): Promise<boolean> {
+  try {
+    await gh([
+      'pr', 'edit', String(prNumber),
+      '--repo', config.repoSlug,
+      '--add-reviewer', 'copilot',
+    ]);
+    return true;
+  } catch {
+    // Copilot review may not be available for this repo — ignore gracefully
+    return false;
+  }
 }

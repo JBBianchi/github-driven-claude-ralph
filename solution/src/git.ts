@@ -5,13 +5,14 @@ const REPO_PATH = '/workspace/repo';
 const WORKTREES_PATH = '/workspace/worktrees';
 
 export async function syncRepo(config: Config): Promise<void> {
-  try {
-    await execa('git', ['rev-parse', '--git-dir'], { cwd: REPO_PATH });
-    // Repo exists — fetch and reset
+  const isGitRepo = await execa('git', ['rev-parse', '--git-dir'], { cwd: REPO_PATH })
+    .then(() => true)
+    .catch(() => false);
+
+  if (isGitRepo) {
     await execa('git', ['fetch', 'origin'], { cwd: REPO_PATH });
     await execa('git', ['reset', '--hard', `origin/${config.baseBranch}`], { cwd: REPO_PATH });
-  } catch {
-    // Not a git repo — clone into it (use '.' to clone into existing directory)
+  } else {
     await execa('git', ['clone', config.repoUrl, '.'], { cwd: REPO_PATH });
   }
 }

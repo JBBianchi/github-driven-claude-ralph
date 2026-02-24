@@ -11,6 +11,7 @@ import {
   mergePR,
   getPRCheckDetails,
   postWorkMapping,
+  requestCopilotReview,
 } from '../../src/github.js';
 import type { Config } from '../../src/types.js';
 
@@ -468,5 +469,30 @@ describe('postWorkMapping', () => {
     expect(body).toContain('branch: task/42-add-login');
     expect(body).toContain('worktree: /workspace/worktrees/42');
     expect(body).toContain('pr: 56');
+  });
+});
+
+describe('requestCopilotReview', () => {
+  beforeEach(() => mockExeca.mockReset());
+
+  it('calls gh pr edit with --add-reviewer copilot and returns true', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+    const result = await requestCopilotReview(makeConfig(), 56);
+
+    expect(result).toBe(true);
+    expect(mockExeca).toHaveBeenCalledWith(
+      'gh',
+      expect.arrayContaining(['pr', 'edit', '56', '--add-reviewer', 'copilot']),
+      expect.any(Object),
+    );
+  });
+
+  it('returns false when Copilot review is not available', async () => {
+    mockExeca.mockRejectedValueOnce(new Error('Could not add reviewer'));
+
+    const result = await requestCopilotReview(makeConfig(), 56);
+
+    expect(result).toBe(false);
   });
 });
