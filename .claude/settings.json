@@ -9,10 +9,8 @@
       "Bash(npm:*)",
       "Bash(docker:*)",
       "Bash(npx:*)",
-      "Bash(ls -la \"c:\\\\Dev\\\\Sandbox\\\\github-driven-claude-ralph\\\\solution\"\" | grep -E \"Dockerfile)",
-      "Bash(entrypoint \")",
-      "Bash(grep -n \"^export async function\\\\|^export function\" /c/Dev/Sandbox/github-driven-claude-ralph/solution/src/*.ts)",
-      "Bash(xxd c:/Dev/Sandbox/github-driven-claude-ralph/solution/secrets/gpg_private_key.asc)"
+      "Bash(ls*)",
+      "Bash(grep*)"
     ]
   }
 }

@@ -1,7 +1,7 @@
 import { execa } from 'execa';
 import { randomUUID } from 'node:crypto';
 import { appendToLog } from './log-files.js';
-import type { Config, GitHubIssue, GitHubPR, PRStatus, ClaimAttempt } from './types.js';
+import type { Config, GitHubIssue, GitHubPR, PRStatus, ClaimAttempt, AgentMeta } from './types.js';
 
 const WORKFLOW_LABELS = [
   'feature',
@@ -13,12 +13,32 @@ const WORKFLOW_LABELS = [
   'plan:needs-clarification',
   'plan:ready',
   'plan:tasks-created',
+  'plan:done',
   'task',
   'todo',
   'in-progress',
   'blocked',
   'needs-human',
 ];
+
+export function parseAgentMeta(body: string): AgentMeta | null {
+  const match = body.match(/<!--\s*agent-meta\s*\n([\s\S]*?)-->/);
+  if (!match) return null;
+
+  const fields: Record<string, string> = {};
+  for (const line of match[1].split('\n')) {
+    const kv = line.match(/^\s*(\w+)\s*:\s*(.+?)\s*$/);
+    if (kv) fields[kv[1]] = kv[2];
+  }
+
+  if (!fields['entity'] || !fields['source_feature']) return null;
+
+  return {
+    entity: fields['entity'] as 'plan' | 'task',
+    source_feature: parseInt(fields['source_feature'], 10),
+    source_plan: fields['source_plan'] ? parseInt(fields['source_plan'], 10) : undefined,
+  };
+}
 
 async function gh(args: string[]): Promise<{ stdout: string }> {
   const start = Date.now();

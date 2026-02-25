@@ -1,5 +1,5 @@
 import { syncRepo } from './git.js';
-import { listIssues } from './github.js';
+import { listIssues, editIssueLabels, closeIssue, parseAgentMeta } from './github.js';
 import { invokeClaude } from './claude.js';
 import type { Config, Logger, GitHubIssue } from './types.js';
 
@@ -81,6 +81,38 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
     }
   } catch (error) {
     logger.error('Phase 2 (task decomposition) failed', { error: String(error) });
+  }
+
+  // Phase 3: Plan completion
+  try {
+    const plansWithTasks = await listIssues(config, ['plan:tasks-created']);
+    if (plansWithTasks.length > 0) {
+      const openTasks = await listIssues(config, ['task']);
+      for (const plan of plansWithTasks) {
+        const remaining = openTasks.filter((t) => {
+          const meta = parseAgentMeta(t.body);
+          return meta?.source_plan === plan.number;
+        });
+        if (remaining.length === 0) {
+          await editIssueLabels(config, plan.number, ['plan:done'], ['plan:tasks-created']);
+          await closeIssue(config, plan.number);
+          logger.info('Plan complete — all tasks done', { planNumber: plan.number });
+
+          // Close source feature if plan has agent-meta
+          const planMeta = parseAgentMeta(plan.body);
+          if (planMeta?.source_feature) {
+            await editIssueLabels(config, planMeta.source_feature, ['done'], ['planned']);
+            await closeIssue(config, planMeta.source_feature);
+            logger.info('Feature complete — plan done', {
+              featureNumber: planMeta.source_feature,
+              planNumber: plan.number,
+            });
+          }
+        }
+      }
+    }
+  } catch (error) {
+    logger.error('Phase 3 (plan completion) failed', { error: String(error) });
   }
 }
 

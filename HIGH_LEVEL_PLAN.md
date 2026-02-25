@@ -729,6 +729,21 @@ loop forever:
         workingDirectory: '/workspace/repo',
       })
 
+    // Phase 3: Plan completion
+    plansWithTasks = listIssues(config, ['plan:tasks-created'])
+    if plansWithTasks.length > 0:
+      openTasks = listIssues(config, ['task'])
+      for plan in plansWithTasks:
+        remaining = openTasks.filter(t => parseAgentMeta(t.body)?.source_plan === plan.number)
+        if remaining.length === 0:
+          editIssueLabels(config, plan.number, ['plan:done'], ['plan:tasks-created'])
+          closeIssue(config, plan.number)
+          // Close source feature
+          meta = parseAgentMeta(plan.body)
+          if meta?.source_feature:
+            editIssueLabels(config, meta.source_feature, ['done'], ['planned'])
+            closeIssue(config, meta.source_feature)
+
   catch error:
     logger.error('Planner iteration failed', { error })
 
@@ -1083,11 +1098,12 @@ You are reviewing CI failures for a pull request.
 | `needs-plan` | Human | Feature needs a plan |
 | `planned` | Planner | Plan and tasks created |
 | `in-execution` | Executor (TS) | Feature has at least one task in progress (optional) |
-| `done` | Executor (TS) | Feature/task complete |
+| `done` | Planner | Feature complete — all plans done (replaces `planned`) |
 | `plan:draft` | Planner | Plan exists, not yet approved |
 | `plan:needs-clarification` | Planner | Human input needed |
 | `plan:ready` | Human/Planner | Plan approved, tasks can be created |
 | `plan:tasks-created` | Planner | All task issues created |
+| `plan:done` | Planner | All tasks complete — plan closed |
 | `task` | Planner | This issue is an implementation task |
 | `todo` | Planner | Task available for claiming |
 | `in-progress` | Executor (TS) | Task claimed and being worked on |

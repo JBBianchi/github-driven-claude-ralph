@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { syncRepo } from '../../src/git.js';
-import { listIssues } from '../../src/github.js';
+import { listIssues, editIssueLabels, closeIssue, parseAgentMeta } from '../../src/github.js';
 import { invokeClaude } from '../../src/claude.js';
 import {
   runPlannerIteration,
@@ -15,6 +15,9 @@ vi.mock('../../src/git.js', () => ({
 
 vi.mock('../../src/github.js', () => ({
   listIssues: vi.fn(),
+  editIssueLabels: vi.fn(),
+  closeIssue: vi.fn(),
+  parseAgentMeta: vi.fn(),
 }));
 
 vi.mock('../../src/claude.js', () => ({
@@ -24,6 +27,9 @@ vi.mock('../../src/claude.js', () => ({
 const mockSyncRepo = vi.mocked(syncRepo);
 const mockListIssues = vi.mocked(listIssues);
 const mockInvokeClaude = vi.mocked(invokeClaude);
+const mockEditIssueLabels = vi.mocked(editIssueLabels);
+const mockCloseIssue = vi.mocked(closeIssue);
+const mockParseAgentMeta = vi.mocked(parseAgentMeta);
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -70,6 +76,8 @@ describe('runPlannerIteration', () => {
     mockSyncRepo.mockResolvedValue(undefined);
     mockListIssues.mockResolvedValue([]);
     mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockEditIssueLabels.mockResolvedValue(undefined);
+    mockCloseIssue.mockResolvedValue(undefined);
   });
 
   it('syncs repo at start of every iteration', async () => {
@@ -167,6 +175,188 @@ describe('runPlannerIteration', () => {
     await runPlannerIteration(makeConfig(), logger);
 
     expect(logger.error).toHaveBeenCalled();
+  });
+
+  // --- Phase 3: Plan completion ---
+
+  it('closes plan when all tasks are done', async () => {
+    const plan = makeIssue({
+      number: 5,
+      title: 'Plan: Add login',
+      labels: ['plan:tasks-created'],
+    });
+    // Phase 1: no features
+    mockListIssues.mockResolvedValueOnce([]);
+    // Phase 2: no ready plans
+    mockListIssues.mockResolvedValueOnce([]);
+    // Phase 3: one plan with tasks-created
+    mockListIssues.mockResolvedValueOnce([plan]);
+    // Phase 3: no open tasks
+    mockListIssues.mockResolvedValueOnce([]);
+
+    const logger = makeLogger();
+    await runPlannerIteration(makeConfig(), logger);
+
+    expect(mockEditIssueLabels).toHaveBeenCalledWith(
+      expect.anything(), 5, ['plan:done'], ['plan:tasks-created'],
+    );
+    expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 5);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Plan complete'),
+      expect.objectContaining({ planNumber: 5 }),
+    );
+  });
+
+  it('skips plan when open tasks remain for it', async () => {
+    const plan = makeIssue({
+      number: 5,
+      title: 'Plan: Add login',
+      labels: ['plan:tasks-created'],
+    });
+    const openTask = makeIssue({
+      number: 99,
+      title: 'Task: Implement login form',
+      body: `<!-- agent-meta\nentity: task\nsource_feature: 1\nsource_plan: 5\n-->`,
+      labels: ['task', 'todo'],
+    });
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockResolvedValueOnce([plan]);
+    mockListIssues.mockResolvedValueOnce([openTask]);
+    mockParseAgentMeta.mockReturnValue({ entity: 'task', source_feature: 1, source_plan: 5 });
+
+    await runPlannerIteration(makeConfig(), makeLogger());
+
+    expect(mockEditIssueLabels).not.toHaveBeenCalled();
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+  });
+
+  it('ignores open tasks from other plans', async () => {
+    const plan = makeIssue({
+      number: 5,
+      title: 'Plan: Add login',
+      labels: ['plan:tasks-created'],
+    });
+    const unrelatedTask = makeIssue({
+      number: 99,
+      title: 'Task: Unrelated',
+      body: `<!-- agent-meta\nentity: task\nsource_feature: 2\nsource_plan: 8\n-->`,
+      labels: ['task', 'todo'],
+    });
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockResolvedValueOnce([plan]);
+    mockListIssues.mockResolvedValueOnce([unrelatedTask]);
+    mockParseAgentMeta.mockReturnValue({ entity: 'task', source_feature: 2, source_plan: 8 });
+
+    await runPlannerIteration(makeConfig(), makeLogger());
+
+    expect(mockEditIssueLabels).toHaveBeenCalledWith(
+      expect.anything(), 5, ['plan:done'], ['plan:tasks-created'],
+    );
+    expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 5);
+  });
+
+  it('skips Phase 3 when no plans have plan:tasks-created', async () => {
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockResolvedValueOnce([]);
+
+    await runPlannerIteration(makeConfig(), makeLogger());
+
+    expect(mockEditIssueLabels).not.toHaveBeenCalled();
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+  });
+
+  it('catches and logs Phase 3 errors', async () => {
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockResolvedValueOnce([]);
+    mockListIssues.mockRejectedValueOnce(new Error('API failure'));
+
+    const logger = makeLogger();
+    await runPlannerIteration(makeConfig(), logger);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Phase 3'),
+      expect.anything(),
+    );
+  });
+
+  // --- Phase 3: Feature completion ---
+
+  it('closes source feature when plan is completed', async () => {
+    const plan = makeIssue({
+      number: 5,
+      title: 'Plan: Add login',
+      body: `<!-- agent-meta\nentity: plan\nsource_feature: 1\n-->`,
+      labels: ['plan:tasks-created'],
+    });
+    mockListIssues.mockResolvedValueOnce([]); // Phase 1
+    mockListIssues.mockResolvedValueOnce([]); // Phase 2
+    mockListIssues.mockResolvedValueOnce([plan]); // Phase 3: plans with tasks-created
+    mockListIssues.mockResolvedValueOnce([]); // Phase 3: no open tasks
+    mockParseAgentMeta.mockReturnValue({ entity: 'plan', source_feature: 1 });
+
+    const logger = makeLogger();
+    await runPlannerIteration(makeConfig(), logger);
+
+    // Plan is closed
+    expect(mockEditIssueLabels).toHaveBeenCalledWith(
+      expect.anything(), 5, ['plan:done'], ['plan:tasks-created'],
+    );
+    expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 5);
+    // Feature is also closed
+    expect(mockEditIssueLabels).toHaveBeenCalledWith(
+      expect.anything(), 1, ['done'], ['planned'],
+    );
+    expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 1);
+  });
+
+  it('does not close feature when plan body has no agent-meta', async () => {
+    const plan = makeIssue({
+      number: 5,
+      title: 'Plan: Add login',
+      body: 'Just a plain plan body',
+      labels: ['plan:tasks-created'],
+    });
+    mockListIssues.mockResolvedValueOnce([]); // Phase 1
+    mockListIssues.mockResolvedValueOnce([]); // Phase 2
+    mockListIssues.mockResolvedValueOnce([plan]); // Phase 3: plans with tasks-created
+    mockListIssues.mockResolvedValueOnce([]); // Phase 3: no open tasks
+    mockParseAgentMeta.mockReturnValue(null);
+
+    await runPlannerIteration(makeConfig(), makeLogger());
+
+    // Plan is closed
+    expect(mockEditIssueLabels).toHaveBeenCalledWith(
+      expect.anything(), 5, ['plan:done'], ['plan:tasks-created'],
+    );
+    expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 5);
+    // Feature is NOT closed (only 1 closeIssue call for the plan)
+    expect(mockCloseIssue).toHaveBeenCalledTimes(1);
+    expect(mockEditIssueLabels).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs feature closure', async () => {
+    const plan = makeIssue({
+      number: 5,
+      title: 'Plan: Add login',
+      body: `<!-- agent-meta\nentity: plan\nsource_feature: 1\n-->`,
+      labels: ['plan:tasks-created'],
+    });
+    mockListIssues.mockResolvedValueOnce([]); // Phase 1
+    mockListIssues.mockResolvedValueOnce([]); // Phase 2
+    mockListIssues.mockResolvedValueOnce([plan]); // Phase 3
+    mockListIssues.mockResolvedValueOnce([]); // Phase 3: no open tasks
+    mockParseAgentMeta.mockReturnValue({ entity: 'plan', source_feature: 1 });
+
+    const logger = makeLogger();
+    await runPlannerIteration(makeConfig(), logger);
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Feature complete'),
+      expect.objectContaining({ featureNumber: 1, planNumber: 5 }),
+    );
   });
 });
 

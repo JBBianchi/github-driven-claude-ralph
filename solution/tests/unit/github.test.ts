@@ -12,6 +12,7 @@ import {
   getPRCheckDetails,
   postWorkMapping,
   requestCopilotReview,
+  parseAgentMeta,
 } from '../../src/github.js';
 import type { Config } from '../../src/types.js';
 
@@ -496,3 +497,46 @@ describe('requestCopilotReview', () => {
     expect(result).toBe(false);
   });
 });
+
+describe('parseAgentMeta', () => {
+  it('parses a complete task meta block', () => {
+    const body = `Some text
+<!-- agent-meta
+entity: task
+source_feature: 10
+source_plan: 5
+-->
+More text`;
+    const meta = parseAgentMeta(body);
+    expect(meta).toEqual({
+      entity: 'task',
+      source_feature: 10,
+      source_plan: 5,
+    });
+  });
+
+  it('parses a plan meta block (no source_plan)', () => {
+    const body = `<!-- agent-meta
+entity: plan
+source_feature: 10
+-->`;
+    const meta = parseAgentMeta(body);
+    expect(meta).toEqual({
+      entity: 'plan',
+      source_feature: 10,
+      source_plan: undefined,
+    });
+  });
+
+  it('returns null when no meta block exists', () => {
+    expect(parseAgentMeta('just a plain body')).toBeNull();
+  });
+
+  it('returns null when required fields are missing', () => {
+    const body = `<!-- agent-meta
+source_plan: 5
+-->`;
+    expect(parseAgentMeta(body)).toBeNull();
+  });
+});
+
