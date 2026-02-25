@@ -37,6 +37,8 @@ solution/
 ├── prompts/              # Markdown prompt files for Claude invocations
 ├── scripts/
 │   └── entrypoint.sh     # Bash — OS-level credential plumbing only
+├── .ai/                  # Agent task journal (see below)
+│   └── tasks/            # One markdown file per task
 ├── Dockerfile            # Multi-stage build
 ├── docker-compose.yml    # Planner + executor services
 ├── package.json
@@ -162,6 +164,57 @@ Files in `prompts/` are the most critical part of the project — they are the "
 - Preserve the `<!-- agent-meta ... -->` and `<!-- work-mapping ... -->` block formats exactly. Do not alter field names, ordering, or delimiters.
 - Never auto-modify prompt structure (headings, step numbering, rule sections) without explicit approval.
 - All prompt changes must be validated against a test repository before merging.
+
+## Agent task journal (`.ai/`)
+
+Maintain a `.ai/tasks/` directory to track work performed during each coding session. This journal is committed alongside code changes and serves as an audit trail for decisions, blockers, and outcomes.
+
+### When to write
+
+- **On task start:** Create `.ai/tasks/<task-id>-<task-name>.md` (e.g.,`42-typecheck-fix.md`).
+- **During work:** Append decisions, trade-offs, and uncertainties as they arise.
+- **On task completion:** Record what was done, what was left out, and why.
+- **On blocker:** Document what blocked progress and what was attempted.
+
+### File format
+
+```markdown
+# Task: <short description>
+
+- **Issue:** #<number> (if applicable)
+- **Status:** in-progress | completed | blocked
+- **Started:** <ISO timestamp>
+- **Completed:** <ISO timestamp or "—">
+
+## Objective
+
+<1-2 sentences: what this task set out to do>
+
+## Work performed
+
+- <concrete change: what file, what function, what was added/changed>
+- ...
+
+## Decisions made
+
+- <decision and rationale, e.g., "Used Map over object for O(1) key lookup">
+- ...
+
+## Blockers / uncertainties
+
+- <anything unresolved, deferred, or requiring human input>
+
+## Outcome
+
+<1-2 sentences: final state — merged, partially done, blocked, etc.>
+```
+
+### Rules
+
+- One file per task. Do not combine unrelated work into a single journal entry.
+- Keep entries factual and terse. No filler prose.
+- Update the `Status` field as it changes — do not leave stale `in-progress` entries.
+- Journal files are committed with the task branch. They are part of the deliverable.
 
 ## Environment variables
 
