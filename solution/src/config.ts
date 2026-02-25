@@ -29,7 +29,7 @@ export function loadConfig(role: Role): Config {
   }
 
   const pollDefault = role === 'planner' ? 120 : 60;
-  const maxTurnsDefault = role === 'planner' ? 30 : 50;
+  const maxTurnsDefault = role === 'planner' ? 50 : 100;
 
   const pollOverride =
     role === 'planner'
