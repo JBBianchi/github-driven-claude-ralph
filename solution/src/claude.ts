@@ -3,6 +3,31 @@ import { appendToLog } from './log-files.js';
 import type { ClaudeInvocation, ClaudeResult } from './types.js';
 
 const TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const CLAUDE_AUTH_FAILURE_PREFIX = 'Claude authentication failed:';
+
+function isClaudeAuthFailure(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('failed to authenticate')
+    || normalized.includes('authentication_error')
+    || normalized.includes('oauth token has expired')
+    || normalized.includes('please obtain a new token')
+    || normalized.includes('401')
+  );
+}
+
+function getAuthFailureMessage(message: string): string {
+  if (message.includes('OAuth token has expired')) {
+    return `${CLAUDE_AUTH_FAILURE_PREFIX} OAuth token has expired.`;
+  }
+  return `${CLAUDE_AUTH_FAILURE_PREFIX} API credentials are invalid or expired.`;
+}
+
+function throwIfClaudeAuthFailure(rawMessage: string): void {
+  if (isClaudeAuthFailure(rawMessage)) {
+    throw new Error(getAuthFailureMessage(rawMessage));
+  }
+}
 
 export async function invokeClaude(invocation: ClaudeInvocation): Promise<ClaudeResult> {
   // Always use JSON output internally for structured error reporting.
@@ -47,6 +72,7 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
 
       // Check for execution errors in the JSON response
       if (parsed.is_error || parsed.subtype === 'error_during_execution') {
+        throwIfClaudeAuthFailure(stdout);
         success = false;
         const errors = parsed.errors?.join('\n') ?? 'Unknown error';
         console.error(`[claude] execution error: ${errors}`);
@@ -58,8 +84,11 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
       if (invocation.outputFormat === 'text' && parsed.result !== undefined) {
         result = parsed.result;
       }
-    } catch {
-      // Not valid JSON — use raw stdout as result
+    } catch (parseError: unknown) {
+      if (!(parseError instanceof SyntaxError)) {
+        throw parseError;
+      }
+      // Not valid JSON - use raw stdout as result
     }
 
     appendToLog('claude.log', `[${new Date().toISOString()}] SUCCESS (${durationMs}ms)\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr ?? '(none)'}\n===`);
@@ -68,7 +97,8 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
   } catch (error: unknown) {
     const durationMs = Date.now() - start;
     const message = error instanceof Error ? error.message : String(error);
-    const stderr = (error as any)?.stderr ?? '';
+    const stderr = (error as { stderr?: string }).stderr ?? '';
+    throwIfClaudeAuthFailure(`${message}\n${stderr}`);
     console.error(`[claude] invocation failed (${durationMs}ms): ${message}`);
     if (stderr) console.error(`[claude] stderr: ${stderr}`);
     appendToLog('claude.log', `[${new Date().toISOString()}] FAILED (${durationMs}ms)\nERROR: ${message}\nSTDERR: ${stderr}\n===`);

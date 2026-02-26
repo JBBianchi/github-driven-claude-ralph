@@ -111,7 +111,7 @@ function makeTask(overrides: Partial<GitHubIssue> = {}): GitHubIssue {
     number: 42,
     title: 'Task: Add button',
     body: 'Add a submit button to the form',
-    labels: ['task', 'todo'],
+    labels: ['task', 'status:todo'],
     state: 'OPEN',
     ...overrides,
   };
@@ -186,9 +186,12 @@ describe('runExecutorIteration', () => {
 
   // --- Phase 1: Claim ---
 
-  it('claims first available task when idle', async () => {
+  it('claims oldest available task when idle', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: null, sessionId: null });
-    mockListIssues.mockResolvedValue([makeTask()]);
+    mockListIssues.mockResolvedValue([
+      makeTask({ number: 43, title: 'Task: Newer task' }),
+      makeTask({ number: 42, title: 'Task: Older task' }),
+    ]);
     mockClaimTask.mockResolvedValue({ taskId: 42, nonce: 'abc', success: true });
     mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
@@ -228,6 +231,21 @@ describe('runExecutorIteration', () => {
 
   // --- Phase 2: Worktree ---
 
+  it('clears stale state when active task issue is missing', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([]);
+
+    const logger = makeLogger();
+    await runExecutorIteration(makeConfig(), logger);
+
+    expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
+    expect(mockInvokeClaude).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('clearing stale state'),
+      expect.objectContaining({ taskId: 42 }),
+    );
+  });
+
   it('creates worktree for claimed task', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
@@ -263,6 +281,24 @@ describe('runExecutorIteration', () => {
     expect(call.systemPromptFile).toContain('exec.md');
     expect(call.prompt).toContain('#42');
     expect(call.prompt).toContain('Add button');
+  });
+
+  it('returns early when Claude implementation invocation fails', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: false, durationMs: 100 });
+
+    await runExecutorIteration(makeConfig(), makeLogger());
+
+    expect(mockFindPRByBranch).not.toHaveBeenCalled();
+  });
+
+  it('rethrows fatal Claude authentication errors to stop loop', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockRejectedValue(new Error('Claude authentication failed: OAuth token has expired.'));
+
+    await expect(runExecutorIteration(makeConfig(), makeLogger())).rejects.toThrow('Claude authentication failed');
   });
 
   it('saves sessionId from Claude result to state', async () => {
@@ -319,6 +355,23 @@ describe('runExecutorIteration', () => {
     expect(mockRequestCopilotReview).toHaveBeenCalledWith(expect.anything(), 56);
   });
 
+  it('logs warning when Copilot review request is unavailable', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(makePR());
+    mockRequestCopilotReview.mockResolvedValue(false);
+    mockGetPRStatus.mockResolvedValue('pending');
+
+    const logger = makeLogger();
+    await runExecutorIteration(makeConfig(), logger);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Copilot review request unavailable'),
+      expect.objectContaining({ prNumber: 56 }),
+    );
+  });
+
   it('returns early when no PR exists yet', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
@@ -344,8 +397,8 @@ describe('runExecutorIteration', () => {
     expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
     expect(mockEditIssueLabels).toHaveBeenCalledWith(
       expect.anything(), 42,
-      ['done'],
-      ['in-progress', 'claimed-by:executor-01'],
+      ['status:done'],
+      ['status:in-progress', 'claimed-by:executor-01'],
     );
     expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 42);
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
@@ -464,7 +517,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), makeLogger());
 
     expect(mockEditIssueLabels).toHaveBeenCalledWith(
-      expect.anything(), 42, ['blocked'], ['in-progress'],
+      expect.anything(), 42, ['status:blocked'], ['status:in-progress'],
     );
     expect(mockAddComment).toHaveBeenCalled();
   });
@@ -503,7 +556,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), makeLogger());
 
     expect(mockEditIssueLabels).toHaveBeenCalledWith(
-      expect.anything(), 42, ['blocked'], ['in-progress'],
+      expect.anything(), 42, ['status:blocked'], ['status:in-progress'],
     );
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
   });
@@ -626,3 +679,4 @@ describe('runExecutorLoop', () => {
     );
   });
 });
+

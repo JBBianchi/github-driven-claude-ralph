@@ -48,7 +48,7 @@ describe('listIssues', () => {
   it('calls gh with correct repo, labels, and JSON fields', async () => {
     mockExeca.mockResolvedValueOnce({ stdout: '[]', stderr: '', exitCode: 0 } as any);
 
-    await listIssues(makeConfig(), ['task', 'todo']);
+    await listIssues(makeConfig(), ['task', 'status:todo']);
 
     expect(mockExeca).toHaveBeenCalledWith(
       'gh',
@@ -56,8 +56,8 @@ describe('listIssues', () => {
         'issue', 'list',
         '--repo', 'org/repo',
         '--label', 'task',
-        '--label', 'todo',
-        '--json', 'number,title,body,labels,state',
+        '--label', 'status:todo',
+        '--json', 'number,title,body,labels,state,updatedAt',
         '--state', 'open',
       ]),
       expect.any(Object),
@@ -71,7 +71,7 @@ describe('listIssues', () => {
           number: 1,
           title: 'Task 1',
           body: 'desc',
-          labels: [{ name: 'task' }, { name: 'todo' }],
+          labels: [{ name: 'task' }, { name: 'status:todo' }],
           state: 'OPEN',
         },
       ]),
@@ -79,10 +79,10 @@ describe('listIssues', () => {
       exitCode: 0,
     } as any);
 
-    const issues = await listIssues(makeConfig(), ['task', 'todo']);
+    const issues = await listIssues(makeConfig(), ['task', 'status:todo']);
 
     expect(issues).toHaveLength(1);
-    expect(issues[0].labels).toEqual(['task', 'todo']);
+    expect(issues[0].labels).toEqual(['task', 'status:todo']);
     expect(issues[0].number).toBe(1);
     expect(issues[0].title).toBe('Task 1');
   });
@@ -90,7 +90,7 @@ describe('listIssues', () => {
   it('returns empty array when no matching issues', async () => {
     mockExeca.mockResolvedValueOnce({ stdout: '[]', stderr: '', exitCode: 0 } as any);
 
-    const issues = await listIssues(makeConfig(), ['task', 'todo']);
+    const issues = await listIssues(makeConfig(), ['task', 'status:todo']);
     expect(issues).toEqual([]);
   });
 
@@ -111,7 +111,7 @@ describe('createIssue', () => {
       exitCode: 0,
     } as any);
 
-    const issueNum = await createIssue(makeConfig(), 'Title', 'Body text', ['task', 'todo']);
+    const issueNum = await createIssue(makeConfig(), 'Title', 'Body text', ['task', 'status:todo']);
 
     expect(mockExeca).toHaveBeenCalledWith(
       'gh',
@@ -121,7 +121,7 @@ describe('createIssue', () => {
         '--title', 'Title',
         '--body', 'Body text',
         '--label', 'task',
-        '--label', 'todo',
+        '--label', 'status:todo',
       ]),
       expect.any(Object),
     );
@@ -146,16 +146,16 @@ describe('editIssueLabels', () => {
   it('adds and removes labels in separate calls', async () => {
     mockExeca.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 } as any);
 
-    await editIssueLabels(makeConfig(), 42, ['in-progress'], ['todo']);
+    await editIssueLabels(makeConfig(), 42, ['status:in-progress'], ['status:todo']);
 
     expect(mockExeca).toHaveBeenCalledWith(
       'gh',
-      expect.arrayContaining(['issue', 'edit', '42', '--repo', 'org/repo', '--add-label', 'in-progress']),
+      expect.arrayContaining(['issue', 'edit', '42', '--repo', 'org/repo', '--add-label', 'status:in-progress']),
       expect.any(Object),
     );
     expect(mockExeca).toHaveBeenCalledWith(
       'gh',
-      expect.arrayContaining(['issue', 'edit', '42', '--repo', 'org/repo', '--remove-label', 'todo']),
+      expect.arrayContaining(['issue', 'edit', '42', '--repo', 'org/repo', '--remove-label', 'status:todo']),
       expect.any(Object),
     );
   });
@@ -163,15 +163,43 @@ describe('editIssueLabels', () => {
   it('skips add call when add array is empty', async () => {
     mockExeca.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 } as any);
 
-    await editIssueLabels(makeConfig(), 42, [], ['todo']);
+    await editIssueLabels(makeConfig(), 42, [], ['status:todo']);
 
     // Should only have 1 call (remove), not 2
     expect(mockExeca).toHaveBeenCalledTimes(1);
     expect(mockExeca).toHaveBeenCalledWith(
       'gh',
-      expect.arrayContaining(['--remove-label', 'todo']),
+      expect.arrayContaining(['--remove-label', 'status:todo']),
       expect.any(Object),
     );
+  });
+
+  it('retries remove without missing labels when gh reports label not found', async () => {
+    mockExeca
+      .mockRejectedValueOnce(new Error("'status:todo' not found"))
+      .mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+    await editIssueLabels(makeConfig(), 42, [], ['status:waiting', 'status:todo']);
+
+    expect(mockExeca).toHaveBeenNthCalledWith(
+      1,
+      'gh',
+      expect.arrayContaining(['--remove-label', 'status:waiting,status:todo']),
+      expect.any(Object),
+    );
+    expect(mockExeca).toHaveBeenNthCalledWith(
+      2,
+      'gh',
+      expect.arrayContaining(['--remove-label', 'status:waiting']),
+      expect.any(Object),
+    );
+  });
+
+  it('swallows remove failure when all labels are missing', async () => {
+    mockExeca.mockRejectedValueOnce(new Error("'status:todo' not found"));
+
+    await expect(editIssueLabels(makeConfig(), 42, [], ['status:todo'])).resolves.toBeUndefined();
+    expect(mockExeca).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -203,8 +231,9 @@ describe('ensureLabels', () => {
     expect(createdLabels).not.toContain('feature');
     expect(createdLabels).not.toContain('task');
     expect(createdLabels).toContain('needs-plan');
-    expect(createdLabels).toContain('todo');
-    expect(createdLabels).toContain('blocked');
+    expect(createdLabels).toContain('status:todo');
+    expect(createdLabels).toContain('status:blocked');
+    expect(createdLabels).toContain('status:waiting');
   });
 });
 
@@ -222,7 +251,7 @@ describe('claimTask', () => {
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify([
         { name: 'task' },
-        { name: 'in-progress' },
+        { name: 'status:in-progress' },
         { name: 'claimed-by:executor-01' },
       ]),
       stderr: '',
@@ -255,7 +284,7 @@ describe('claimTask', () => {
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify([
         { name: 'task' },
-        { name: 'in-progress' },
+        { name: 'status:in-progress' },
         { name: 'claimed-by:executor-02' },
       ]),
       stderr: '',
@@ -280,7 +309,7 @@ describe('claimTask', () => {
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify([
         { name: 'task' },
-        { name: 'in-progress' },
+        { name: 'status:in-progress' },
         { name: 'claimed-by:executor-01' },
       ]),
       stderr: '',
@@ -316,7 +345,7 @@ describe('findPRByBranch', () => {
           headRefName: 'task/42-add-login',
           mergeable: 'MERGEABLE',
           reviewDecision: 'APPROVED',
-          statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+          mergeStateStatus: 'CLEAN',
         },
       ]),
       stderr: '',
@@ -347,7 +376,7 @@ describe('getPRStatus', () => {
       stdout: JSON.stringify({
         mergeable: 'MERGEABLE',
         reviewDecision: 'APPROVED',
-        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        mergeStateStatus: 'CLEAN',
       }),
       stderr: '',
       exitCode: 0,
@@ -362,10 +391,7 @@ describe('getPRStatus', () => {
       stdout: JSON.stringify({
         mergeable: 'MERGEABLE',
         reviewDecision: 'APPROVED',
-        statusCheckRollup: [
-          { conclusion: 'SUCCESS' },
-          { conclusion: 'FAILURE' },
-        ],
+        mergeStateStatus: 'UNSTABLE',
       }),
       stderr: '',
       exitCode: 0,
@@ -375,12 +401,41 @@ describe('getPRStatus', () => {
     expect(status).toBe('failing');
   });
 
-  it('returns pending when checks are in progress', async () => {
+  it('returns pending when checks pass but review is not approved', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: '',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('pending');
+  });
+
+  it('returns pending when merge state is blocked', async () => {
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify({
         mergeable: 'MERGEABLE',
         reviewDecision: null,
-        statusCheckRollup: [{ conclusion: null }],
+        mergeStateStatus: 'BLOCKED',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('pending');
+  });
+
+  it('returns pending when mergeStateStatus is unavailable', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: 'APPROVED',
       }),
       stderr: '',
       exitCode: 0,
@@ -395,7 +450,7 @@ describe('getPRStatus', () => {
       stdout: JSON.stringify({
         mergeable: 'CONFLICTING',
         reviewDecision: null,
-        statusCheckRollup: [],
+        mergeStateStatus: 'UNKNOWN',
       }),
       stderr: '',
       exitCode: 0,
@@ -434,8 +489,8 @@ describe('getPRCheckDetails', () => {
   it('returns formatted check failure details', async () => {
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify([
-        { name: 'build', conclusion: 'FAILURE', detailsUrl: 'https://ci.example.com/1' },
-        { name: 'lint', conclusion: 'SUCCESS', detailsUrl: 'https://ci.example.com/2' },
+        { name: 'build', state: 'FAIL', link: 'https://ci.example.com/1' },
+        { name: 'lint', state: 'PASS', link: 'https://ci.example.com/2' },
       ]),
       stderr: '',
       exitCode: 0,
@@ -444,7 +499,21 @@ describe('getPRCheckDetails', () => {
     const details = await getPRCheckDetails(makeConfig(), 56);
 
     expect(details).toContain('build');
-    expect(details).toContain('FAILURE');
+    expect(details).toContain('FAIL');
+  });
+
+  it('handles missing state/link fields defensively', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        { name: 'build' },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    const details = await getPRCheckDetails(makeConfig(), 56);
+
+    expect(details).toContain('build: UNKNOWN (n/a)');
   });
 });
 
@@ -476,7 +545,7 @@ describe('postWorkMapping', () => {
 describe('requestCopilotReview', () => {
   beforeEach(() => mockExeca.mockReset());
 
-  it('calls gh pr edit with --add-reviewer copilot and returns true', async () => {
+  it('calls gh api requested_reviewers endpoint and returns true', async () => {
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
 
     const result = await requestCopilotReview(makeConfig(), 56);
@@ -484,7 +553,12 @@ describe('requestCopilotReview', () => {
     expect(result).toBe(true);
     expect(mockExeca).toHaveBeenCalledWith(
       'gh',
-      expect.arrayContaining(['pr', 'edit', '56', '--add-reviewer', 'copilot']),
+      expect.arrayContaining([
+        'api',
+        '--method', 'POST',
+        '/repos/org/repo/pulls/56/requested_reviewers',
+        '-f', 'reviewers[]=github-copilot',
+      ]),
       expect.any(Object),
     );
   });
@@ -496,6 +570,14 @@ describe('requestCopilotReview', () => {
 
     expect(result).toBe(false);
   });
+
+  it('returns true when reviewer is already requested', async () => {
+    mockExeca.mockRejectedValueOnce(new Error('is already requested'));
+
+    const result = await requestCopilotReview(makeConfig(), 56);
+
+    expect(result).toBe(true);
+  });
 });
 
 describe('parseAgentMeta', () => {
@@ -505,6 +587,7 @@ describe('parseAgentMeta', () => {
 entity: task
 source_feature: 10
 source_plan: 5
+depends_on: [2, 3]
 -->
 More text`;
     const meta = parseAgentMeta(body);
@@ -512,6 +595,7 @@ More text`;
       entity: 'task',
       source_feature: 10,
       source_plan: 5,
+      depends_on: [2, 3],
     });
   });
 
@@ -525,7 +609,19 @@ source_feature: 10
       entity: 'plan',
       source_feature: 10,
       source_plan: undefined,
+      depends_on: undefined,
     });
+  });
+
+  it('parses empty dependency list', () => {
+    const body = `<!-- agent-meta
+entity: task
+source_feature: 10
+source_plan: 5
+depends_on: []
+-->`;
+    const meta = parseAgentMeta(body);
+    expect(meta?.depends_on).toEqual([]);
   });
 
   it('returns null when no meta block exists', () => {
@@ -539,4 +635,5 @@ source_plan: 5
     expect(parseAgentMeta(body)).toBeNull();
   });
 });
+
 

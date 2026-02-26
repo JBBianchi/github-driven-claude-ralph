@@ -1,0 +1,21 @@
+- MILESTONES:
+  - M1: Define and align schema (labels + agent-meta dependency fields).
+  - M2: Update planner to emit dependencies and manage waiting/todo transitions.
+  - M3: Migrate label usage to status:* consistently across planner/executor/github wrappers.
+  - M4: Add stale waiting guard and deterministic sweep behavior.
+  - M5: Add/adjust tests and run full validation.
+- TASK BREAKDOWN:
+  - Add agent-meta optional field `depends_on: number[]` and parsing support.
+  - Introduce status labels: status:todo, status:in-progress, status:blocked, status:done, status:waiting.
+  - Update workflow label registry and all label edits/list queries to new names.
+  - Update prompt instructions so planner emits depends_on and sets initial status:waiting for blocked tasks, status:todo for ready tasks after full decomposition pass.
+  - Implement planner sweep phase: read task metadata, compute unmet deps based on status:done label, promote/demote waiting/todo accordingly.
+  - Implement stale waiting guard: add planner comment after threshold with blocked-by task references.
+  - Keep executor logic unchanged except renamed status labels and optional parent feature sanity check.
+  - Add migration strategy for existing plain labels.
+- VALIDATION STRATEGY:
+  - Unit tests for parseAgentMeta dependency parsing edge cases.
+  - Planner tests for readiness sweep transitions and stale guard behavior.
+  - Executor tests confirming claim flow still only targets status:todo.
+  - GitHub wrapper tests for new label names and ensureLabels coverage.
+  - Mandatory checks: npm run typecheck, npm test.

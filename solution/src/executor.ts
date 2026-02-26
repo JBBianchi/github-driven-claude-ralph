@@ -19,11 +19,21 @@ import {
   clearActiveTask,
   recoverStateFromGitHub,
 } from './state.js';
+import { LABELS, claimedByLabel } from './labels.js';
 import type { Config, Logger, GitHubIssue, GitHubPR, ExecutorState, PRStatus } from './types.js';
 
 const PROMPTS_DIR = '/opt/agent/prompts';
 const MAX_REVIEW_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_FAILURES = 3;
+const CLAUDE_AUTH_FAILURE_PREFIX = 'Claude authentication failed:';
+
+async function listRunnableTasks(config: Config): Promise<GitHubIssue[]> {
+  return listIssues(config, [LABELS.task, LABELS.statusTodo]);
+}
+
+function isFatalClaudeAuthError(error: unknown): boolean {
+  return String(error).includes(CLAUDE_AUTH_FAILURE_PREFIX);
+}
 
 export function buildExecutorPrompt(
   config: Config,
@@ -91,13 +101,20 @@ async function runReviewLoop(
     const checkDetails = await getPRCheckDetails(config, pr.number);
     const prompt = buildReviewPrompt(config, task, pr, checkDetails);
 
-    await invokeClaude({
+    const reviewResult = await invokeClaude({
       prompt,
       systemPromptFile: `${PROMPTS_DIR}/review.md`,
       maxTurns: config.maxTurnsPerRun,
       outputFormat: 'text',
       workingDirectory: worktreePath,
     });
+    if (!reviewResult.success) {
+      logger.warn('Claude review invocation failed; deferring to next iteration', {
+        taskId: task.number,
+        prNumber: pr.number,
+      });
+      return false;
+    }
 
     await pushBranch(worktreePath);
 
@@ -113,7 +130,12 @@ async function runReviewLoop(
     task.number,
     `CI failures could not be resolved after ${MAX_REVIEW_ATTEMPTS} review attempts. Marking as blocked.`,
   );
-  await editIssueLabels(config, task.number, ['blocked'], ['in-progress']);
+  await editIssueLabels(
+    config,
+    task.number,
+    [LABELS.statusBlocked],
+    [LABELS.statusInProgress],
+  );
   return false;
 }
 
@@ -146,15 +168,18 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
   try {
     // --- Phase 1: Claim if idle ---
     if (state.activeTaskId === null) {
-      const tasks = await listIssues(config, ['task', 'todo']);
+      const tasks = await listRunnableTasks(config);
       if (tasks.length === 0) {
         logger.info('No tasks available. Sleeping.', {});
         return;
       }
 
-      const claim = await claimTask(config, tasks[0].number);
+      const oldestTask = tasks.reduce((oldest, current) => (
+        current.number < oldest.number ? current : oldest
+      ));
+      const claim = await claimTask(config, oldestTask.number);
       if (!claim.success) {
-        logger.warn('Claim failed, another executor won', { taskId: tasks[0].number });
+        logger.warn('Claim failed, another executor won', { taskId: oldestTask.number });
         return;
       }
 
@@ -164,10 +189,13 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     }
 
     // --- Phase 2: Setup worktree ---
-    const taskIssues = await listIssues(config, ['task']);
+    const taskIssues = await listIssues(config, [LABELS.task]);
     const task = taskIssues.find((t) => t.number === state.activeTaskId);
     if (!task) {
-      logger.error('Could not find task issue', { taskId: state.activeTaskId });
+      logger.warn('Active task issue not found among open tasks; clearing stale state', {
+        taskId: state.activeTaskId,
+      });
+      clearActiveTask(config.executorId);
       return;
     }
 
@@ -185,6 +213,12 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       workingDirectory: worktreePath,
       resumeSessionId: state.sessionId ?? undefined,
     });
+    if (!result.success) {
+      logger.warn('Claude implementation invocation failed; deferring to next iteration', {
+        taskId: state.activeTaskId,
+      });
+      return;
+    }
 
     if (result.sessionId) {
       state.sessionId = result.sessionId;
@@ -204,13 +238,21 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     }
 
     await postWorkMapping(config, state.activeTaskId!, branch, worktreePath, pr.number);
-    await requestCopilotReview(config, pr.number);
+    const reviewRequested = await requestCopilotReview(config, pr.number);
+    if (!reviewRequested) {
+      logger.warn('Copilot review request unavailable for PR', { prNumber: pr.number });
+    }
     const prStatus = await getPRStatus(config, pr.number);
 
     switch (prStatus) {
       case 'mergeable':
         await mergePR(config, pr.number);
-        await editIssueLabels(config, state.activeTaskId!, ['done'], ['in-progress', `claimed-by:${config.executorId}`]);
+        await editIssueLabels(
+          config,
+          state.activeTaskId!,
+          [LABELS.statusDone],
+          [LABELS.statusInProgress, claimedByLabel(config.executorId)],
+        );
         await closeIssue(config, state.activeTaskId!);
         clearActiveTask(config.executorId);
         logger.info('Task complete — PR merged', { taskId: state.activeTaskId, prNumber: pr.number });
@@ -221,7 +263,12 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
         const fixed = await runReviewLoop(config, logger, task, pr, worktreePath);
         if (fixed) {
           await mergePR(config, pr.number);
-          await editIssueLabels(config, state.activeTaskId!, ['done'], ['in-progress', `claimed-by:${config.executorId}`]);
+          await editIssueLabels(
+            config,
+            state.activeTaskId!,
+            [LABELS.statusDone],
+            [LABELS.statusInProgress, claimedByLabel(config.executorId)],
+          );
           await closeIssue(config, state.activeTaskId!);
           clearActiveTask(config.executorId);
           logger.info('Task complete after review — PR merged', { taskId: state.activeTaskId, prNumber: pr.number });
@@ -244,6 +291,11 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       writeExecutorState(config.executorId, state);
     }
   } catch (error) {
+    if (isFatalClaudeAuthError(error)) {
+      logger.error('Fatal Claude authentication failure. Stopping executor loop.', { error: String(error) });
+      throw error;
+    }
+
     logger.error('Executor iteration failed', { error: String(error) });
 
     // Circuit breaker: track consecutive failures for active tasks
@@ -262,7 +314,12 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
             state.activeTaskId,
             `Task has failed ${MAX_CONSECUTIVE_FAILURES} consecutive iterations. Marking as blocked.`,
           );
-          await editIssueLabels(config, state.activeTaskId, ['blocked'], ['in-progress']);
+          await editIssueLabels(
+            config,
+            state.activeTaskId,
+            [LABELS.statusBlocked],
+            [LABELS.statusInProgress],
+          );
           clearActiveTask(config.executorId);
         } catch (blockError) {
           logger.error('Failed to mark task as blocked', { error: String(blockError) });

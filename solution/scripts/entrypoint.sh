@@ -185,6 +185,7 @@ esac
 # =========================================================
 # 4. Verify gh CLI authentication
 # =========================================================
+echo "GitHub CLI version: $(gh --version | head -n 1)"
 # gh uses the GH_TOKEN env var automatically; just verify it works
 gh auth status
 

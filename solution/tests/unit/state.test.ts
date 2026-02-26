@@ -141,7 +141,7 @@ describe('recoverStateFromGitHub', () => {
 
   it('returns state with active task when claimed issue found', async () => {
     mockListIssues.mockResolvedValueOnce([
-      { number: 42, title: 'Task', body: '', labels: ['in-progress', 'claimed-by:executor-01'], state: 'OPEN' },
+      { number: 42, title: 'Task', body: '', labels: ['status:in-progress', 'claimed-by:executor-01'], state: 'OPEN' },
     ]);
 
     const state = await recoverStateFromGitHub(makeConfig());
@@ -168,3 +168,4 @@ describe('recoverStateFromGitHub', () => {
     );
   });
 });
+

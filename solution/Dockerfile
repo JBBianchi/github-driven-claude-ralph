@@ -3,9 +3,19 @@ FROM node:20-slim AS base
 ARG CLAUDE_CODE_VERSION=latest
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git gh gpg gpg-agent jq curl ca-certificates openssh-client \
+    git gpg gpg-agent jq curl ca-certificates openssh-client \
     python3 python3-venv python3-dev \
     build-essential pkg-config libssl-dev golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}

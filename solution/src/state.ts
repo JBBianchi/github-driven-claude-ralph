@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { listIssues } from './github.js';
+import { LABELS, claimedByLabel } from './labels.js';
 import type { Config, ExecutorState } from './types.js';
 
 const STATE_BASE = '/workspace/state/executor';
@@ -42,8 +43,8 @@ export function clearActiveTask(executorId: string): void {
 }
 
 export async function recoverStateFromGitHub(config: Config): Promise<ExecutorState> {
-  const claimedByLabel = `claimed-by:${config.executorId}`;
-  const issues = await listIssues(config, ['in-progress', claimedByLabel]);
+  const claimedBy = claimedByLabel(config.executorId);
+  const issues = await listIssues(config, [LABELS.statusInProgress, claimedBy]);
 
   if (issues.length > 0) {
     return { activeTaskId: issues[0].number, sessionId: null, consecutiveFailures: 0 };

@@ -102,6 +102,16 @@ describe('invokeClaude', () => {
     expect(result.durationMs).toBeTypeOf('number');
   });
 
+  it('throws when process output indicates expired authentication token', async () => {
+    const error = new Error('Failed to authenticate. API Error: 401 authentication_error OAuth token has expired.') as any;
+    error.exitCode = 1;
+    error.stderr = '';
+    error.stdout = '';
+    mockExeca.mockRejectedValueOnce(error);
+
+    await expect(invokeClaude(makeInvocation())).rejects.toThrow('Claude authentication failed');
+  });
+
   it('sets 30-minute timeout', async () => {
     mockExeca.mockResolvedValueOnce({ stdout: '{}', stderr: '', exitCode: 0 } as any);
 
@@ -144,6 +154,21 @@ describe('invokeClaude', () => {
 
     expect(result.success).toBe(false);
     expect(result.sessionId).toBe('sess-err');
+  });
+
+  it('throws when JSON execution error indicates authentication failure', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        is_error: true,
+        subtype: 'error_during_execution',
+        session_id: 'sess-auth',
+        errors: ['authentication_error: OAuth token has expired'],
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    await expect(invokeClaude(makeInvocation())).rejects.toThrow('Claude authentication failed');
   });
 
   it('measures duration in milliseconds', async () => {

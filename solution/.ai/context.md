@@ -1,0 +1,19 @@
+- KEY CONSTRAINTS:
+  - Executor should only claim runnable tasks and remain dependency-agnostic.
+  - Planner is scheduler and owns dependency readiness transitions.
+  - Task completion is defined by status label status:done.
+  - Dependency data must remain explicit and inspectable in issue body agent-meta.
+  - Existing code currently uses plain labels (todo, in-progress, blocked, done) and needs migration.
+- KEY ASSUMPTIONS:
+  - Planner polling loop can run readiness sweep each cycle.
+  - Task issues already include agent-meta blocks that can be extended.
+  - GitHub labels can be migrated atomically enough for bounded transition period.
+- RELEVANT PATHS / LINKS:
+  - src/github.ts
+  - src/planner.ts
+  - src/executor.ts
+  - src/types.ts
+  - prompts/tasks.md
+  - tests/unit/planner.test.ts
+  - tests/unit/executor.test.ts
+  - tests/unit/github.test.ts

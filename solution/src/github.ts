@@ -1,25 +1,35 @@
 import { execa } from 'execa';
 import { randomUUID } from 'node:crypto';
 import { appendToLog } from './log-files.js';
+import { CLAIMED_BY_PREFIX, LABELS, WORKFLOW_LABELS, claimedByLabel } from './labels.js';
 import type { Config, GitHubIssue, GitHubPR, PRStatus, ClaimAttempt, AgentMeta } from './types.js';
 
-const WORKFLOW_LABELS = [
-  'feature',
-  'needs-plan',
-  'planned',
-  'in-execution',
-  'done',
-  'plan:draft',
-  'plan:needs-clarification',
-  'plan:ready',
-  'plan:tasks-created',
-  'plan:done',
-  'task',
-  'todo',
-  'in-progress',
-  'blocked',
-  'needs-human',
-];
+function extractMissingLabelNames(message: string): string[] {
+  const matches = [...message.matchAll(/'([^']+)'\s+not found/g)];
+  return [...new Set(matches.map((match) => match[1]))];
+}
+
+function parseDependsOn(raw: string | undefined): number[] | undefined {
+  if (raw === undefined) return undefined;
+
+  const trimmed = raw.trim();
+  if (trimmed === '[]') return [];
+
+  const inner = trimmed.startsWith('[') && trimmed.endsWith(']')
+    ? trimmed.slice(1, -1).trim()
+    : trimmed;
+  if (inner.length === 0) return [];
+
+  const values = inner
+    .split(',')
+    .map((value) => value.trim().replace(/^#/, ''))
+    .filter((value) => /^\d+$/.test(value))
+    .map((value) => parseInt(value, 10))
+    .filter((value) => value > 0);
+
+  if (values.length === 0) return undefined;
+  return [...new Set(values)];
+}
 
 export function parseAgentMeta(body: string): AgentMeta | null {
   const match = body.match(/<!--\s*agent-meta\s*\n([\s\S]*?)-->/);
@@ -37,6 +47,7 @@ export function parseAgentMeta(body: string): AgentMeta | null {
     entity: fields['entity'] as 'plan' | 'task',
     source_feature: parseInt(fields['source_feature'], 10),
     source_plan: fields['source_plan'] ? parseInt(fields['source_plan'], 10) : undefined,
+    depends_on: parseDependsOn(fields['depends_on']),
   };
 }
 
@@ -56,12 +67,16 @@ async function gh(args: string[]): Promise<{ stdout: string }> {
   }
 }
 
-export async function listIssues(config: Config, labels: string[]): Promise<GitHubIssue[]> {
+export async function listIssues(
+  config: Config,
+  labels: string[],
+  state: 'open' | 'closed' | 'all' = 'open',
+): Promise<GitHubIssue[]> {
   const args = [
     'issue', 'list',
     '--repo', config.repoSlug,
-    '--state', 'open',
-    '--json', 'number,title,body,labels,state',
+    '--state', state,
+    '--json', 'number,title,body,labels,state,updatedAt',
   ];
   for (const label of labels) {
     args.push('--label', label);
@@ -74,6 +89,7 @@ export async function listIssues(config: Config, labels: string[]): Promise<GitH
     body: string;
     labels: Array<{ name: string }>;
     state: string;
+    updatedAt?: string;
   }>;
 
   return raw.map((issue) => ({
@@ -82,7 +98,17 @@ export async function listIssues(config: Config, labels: string[]): Promise<GitH
     body: issue.body,
     labels: issue.labels.map((l) => l.name),
     state: issue.state as 'OPEN' | 'CLOSED',
+    updatedAt: issue.updatedAt,
   }));
+}
+
+function parseRepoSlug(repoSlug: string): { owner: string; repo: string } {
+  const parts = repoSlug.split('/');
+  if (parts.length !== 2 || parts[0].length === 0 || parts[1].length === 0) {
+    throw new Error(`Invalid repo slug: ${repoSlug}. Expected format "owner/repo".`);
+  }
+
+  return { owner: parts[0], repo: parts[1] };
 }
 
 export async function createIssue(
@@ -124,11 +150,30 @@ export async function editIssueLabels(
     ]);
   }
   if (remove.length > 0) {
-    await gh([
-      'issue', 'edit', String(issueNumber),
-      '--repo', config.repoSlug,
-      '--remove-label', remove.join(','),
-    ]);
+    try {
+      await gh([
+        'issue', 'edit', String(issueNumber),
+        '--repo', config.repoSlug,
+        '--remove-label', remove.join(','),
+      ]);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      const missingLabels = extractMissingLabelNames(message);
+      if (missingLabels.length === 0) {
+        throw error;
+      }
+
+      const retryLabels = remove.filter((label) => !missingLabels.includes(label));
+      if (retryLabels.length === 0) {
+        return;
+      }
+
+      await gh([
+        'issue', 'edit', String(issueNumber),
+        '--repo', config.repoSlug,
+        '--remove-label', retryLabels.join(','),
+      ]);
+    }
   }
 }
 
@@ -145,9 +190,9 @@ export async function ensureLabels(config: Config): Promise<void> {
   );
 
   // Static workflow labels + dynamic claimed-by label for this executor
-  const labels = [...WORKFLOW_LABELS];
+  const labels: string[] = [...WORKFLOW_LABELS];
   if (config.role === 'executor') {
-    labels.push(`claimed-by:${config.executorId}`);
+    labels.push(claimedByLabel(config.executorId));
   }
 
   for (const label of labels) {
@@ -162,10 +207,15 @@ export async function ensureLabels(config: Config): Promise<void> {
 
 export async function claimTask(config: Config, taskId: number): Promise<ClaimAttempt> {
   const nonce = randomUUID();
-  const claimedByLabel = `claimed-by:${config.executorId}`;
+  const claimedBy = claimedByLabel(config.executorId);
 
   // Step 1: Swap labels
-  await editIssueLabels(config, taskId, ['in-progress', claimedByLabel], ['todo']);
+  await editIssueLabels(
+    config,
+    taskId,
+    [LABELS.statusInProgress, claimedBy],
+    [LABELS.statusTodo],
+  );
 
   // Step 2: Post nonce comment
   await gh([
@@ -187,13 +237,18 @@ export async function claimTask(config: Config, taskId: number): Promise<ClaimAt
   const labels = (JSON.parse(labelsJson) as Array<{ name: string }>).map((l) => l.name);
 
   // Check if another executor's claimed-by label exists
-  const claimedByLabels = labels.filter((l) => l.startsWith('claimed-by:'));
-  const ourClaimPresent = claimedByLabels.includes(claimedByLabel);
-  const otherClaimPresent = claimedByLabels.some((l) => l !== claimedByLabel);
+  const claimedByLabels = labels.filter((l) => l.startsWith(CLAIMED_BY_PREFIX));
+  const ourClaimPresent = claimedByLabels.includes(claimedBy);
+  const otherClaimPresent = claimedByLabels.some((l) => l !== claimedBy);
 
   if (otherClaimPresent || !ourClaimPresent) {
     // Lost the race — unclaim
-    await editIssueLabels(config, taskId, ['todo'], ['in-progress', claimedByLabel]);
+    await editIssueLabels(
+      config,
+      taskId,
+      [LABELS.statusTodo],
+      [LABELS.statusInProgress, claimedBy],
+    );
     return { taskId, nonce, success: false };
   }
 
@@ -211,7 +266,12 @@ export async function claimTask(config: Config, taskId: number): Promise<ClaimAt
     const lastClaim = claimComments[claimComments.length - 1];
     if (!lastClaim.body.includes(`executor:${config.executorId}`)) {
       // Another executor posted a newer nonce
-      await editIssueLabels(config, taskId, ['todo'], ['in-progress', claimedByLabel]);
+      await editIssueLabels(
+        config,
+        taskId,
+        [LABELS.statusTodo],
+        [LABELS.statusInProgress, claimedBy],
+      );
       return { taskId, nonce, success: false };
     }
   }
@@ -224,7 +284,7 @@ export async function findPRByBranch(config: Config, branch: string): Promise<Gi
     'pr', 'list',
     '--repo', config.repoSlug,
     '--head', branch,
-    '--json', 'number,title,headRefName,mergeable,reviewDecision,statusCheckRollup',
+    '--json', 'number,title,headRefName,mergeable,reviewDecision,mergeStateStatus',
   ]);
 
   const prs = JSON.parse(stdout) as Array<{
@@ -233,7 +293,7 @@ export async function findPRByBranch(config: Config, branch: string): Promise<Gi
     headRefName: string;
     mergeable: string;
     reviewDecision: string | null;
-    statusCheckRollup: Array<{ conclusion: string | null }>;
+    mergeStateStatus?: string;
   }>;
 
   if (prs.length === 0) return null;
@@ -245,37 +305,40 @@ export async function findPRByBranch(config: Config, branch: string): Promise<Gi
     headBranch: pr.headRefName,
     mergeable: pr.mergeable as 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN',
     reviewDecision: pr.reviewDecision,
-    checksStatus: deriveChecksStatus(pr.statusCheckRollup),
+    checksStatus: deriveChecksStatusFromMergeState(pr.mergeStateStatus ?? 'UNKNOWN'),
   };
 }
 
-function deriveChecksStatus(
-  checks: Array<{ conclusion: string | null }>,
-): 'passing' | 'failing' | 'pending' {
-  if (checks.length === 0) return 'passing';
-  if (checks.some((c) => c.conclusion === 'FAILURE')) return 'failing';
-  if (checks.some((c) => c.conclusion === null)) return 'pending';
-  return 'passing';
+function deriveChecksStatusFromMergeState(mergeStateStatus: string): 'passing' | 'failing' | 'pending' {
+  const normalized = mergeStateStatus.toUpperCase();
+  if (normalized === 'UNSTABLE') return 'failing';
+  if (normalized === 'CLEAN') return 'passing';
+  return 'pending';
 }
 
 export async function getPRStatus(config: Config, prNumber: number): Promise<PRStatus> {
   const { stdout } = await gh([
     'pr', 'view', String(prNumber),
     '--repo', config.repoSlug,
-    '--json', 'mergeable,reviewDecision,statusCheckRollup',
+    '--json', 'mergeable,reviewDecision,mergeStateStatus',
   ]);
 
   const pr = JSON.parse(stdout) as {
     mergeable: string;
     reviewDecision: string | null;
-    statusCheckRollup: Array<{ conclusion: string | null }>;
+    mergeStateStatus?: string;
   };
 
-  if (pr.mergeable === 'CONFLICTING') return 'conflicting';
+  const mergeStateStatus = (pr.mergeStateStatus ?? 'UNKNOWN').toUpperCase();
+  if (pr.mergeable === 'CONFLICTING' || mergeStateStatus === 'DIRTY') return 'conflicting';
 
-  const checksStatus = deriveChecksStatus(pr.statusCheckRollup);
+  const checksStatus = deriveChecksStatusFromMergeState(mergeStateStatus);
   if (checksStatus === 'failing') return 'failing';
   if (checksStatus === 'pending') return 'pending';
+
+  // Only merge when checks pass and a reviewer has approved.
+  const reviewDecision = (pr.reviewDecision ?? '').trim().toUpperCase();
+  if (reviewDecision !== 'APPROVED') return 'pending';
 
   return 'mergeable';
 }
@@ -284,17 +347,17 @@ export async function getPRCheckDetails(config: Config, prNumber: number): Promi
   const { stdout } = await gh([
     'pr', 'checks', String(prNumber),
     '--repo', config.repoSlug,
-    '--json', 'name,conclusion,detailsUrl',
+    '--json', 'name,state,link',
   ]);
 
   const checks = JSON.parse(stdout) as Array<{
     name: string;
-    conclusion: string;
-    detailsUrl: string;
+    state?: string;
+    link?: string;
   }>;
 
   return checks
-    .map((c) => `${c.name}: ${c.conclusion} (${c.detailsUrl})`)
+    .map((c) => `${c.name}: ${c.state ?? 'UNKNOWN'} (${c.link ?? 'n/a'})`)
     .join('\n');
 }
 
@@ -350,14 +413,22 @@ export async function closeIssue(config: Config, issueNumber: number): Promise<v
 
 export async function requestCopilotReview(config: Config, prNumber: number): Promise<boolean> {
   try {
+    const { owner, repo } = parseRepoSlug(config.repoSlug);
     await gh([
-      'pr', 'edit', String(prNumber),
-      '--repo', config.repoSlug,
-      '--add-reviewer', 'copilot',
+      'api',
+      '--method', 'POST',
+      `/repos/${owner}/${repo}/pulls/${prNumber}/requested_reviewers`,
+      '-f', 'reviewers[]=github-copilot',
     ]);
     return true;
-  } catch {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/already requested/i.test(message)) {
+      return true;
+    }
+
     // Copilot review may not be available for this repo — ignore gracefully
     return false;
   }
 }
+

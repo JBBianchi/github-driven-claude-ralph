@@ -1,0 +1,12 @@
+- GOAL: Produce a concrete implementation plan for planner-owned task dependencies while keeping executor claim logic simple.
+- CURRENT FOCUS: Planning complete; awaiting implementation.
+- NEXT ACTIONS:
+  - Implement label migration to status:* across wrappers, planner, executor, and tests.
+  - Extend agent-meta parsing/types for depends_on.
+  - Add planner waiting/todo sweep and stale waiting guard.
+  - Run mandatory validation: npm run typecheck, npm test.
+- OUT OF SCOPE:
+  - Adding dependency parsing or graph resolution in executor hot path.
+  - Replacing CLI wrappers or changing architecture roles.
+- BLOCKED BY: None.
+- LAST UPDATED: 2026-02-26

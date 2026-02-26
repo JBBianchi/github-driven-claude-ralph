@@ -24,6 +24,7 @@ export interface GitHubIssue {
   body: string;
   labels: string[];
   state: 'OPEN' | 'CLOSED';
+  updatedAt?: string;
 }
 
 export interface GitHubPR {
@@ -42,6 +43,7 @@ export interface AgentMeta {
   entity: 'plan' | 'task';
   source_feature: number;
   source_plan?: number;
+  depends_on?: number[];
   executor_id?: string;
   branch?: string;
   pr?: number;
