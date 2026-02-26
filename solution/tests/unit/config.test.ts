@@ -45,7 +45,7 @@ describe('loadConfig', () => {
     const config = loadConfig('planner');
 
     expect(config.pollIntervalSeconds).toBe(120);
-    expect(config.maxTurnsPerRun).toBe(30);
+    expect(config.maxTurnsPerRun).toBe(50);
   });
 
   it('applies executor defaults for pollIntervalSeconds, maxTurnsPerRun, executorId', () => {
@@ -53,7 +53,7 @@ describe('loadConfig', () => {
     const config = loadConfig('executor');
 
     expect(config.pollIntervalSeconds).toBe(60);
-    expect(config.maxTurnsPerRun).toBe(50);
+    expect(config.maxTurnsPerRun).toBe(100);
     expect(config.executorId).toBe('executor-01');
   });
 

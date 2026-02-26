@@ -14,6 +14,19 @@ services:
       GIT_COMMIT_SIGNING: ${GIT_COMMIT_SIGNING:-off}
       GIT_SIGNING_KEY: ${GIT_SIGNING_KEY:-}
       SIGNING_KEYS_MOUNT: /mnt/host-keys
+      RLM_PLUGIN_ENABLED: ${RLM_PLUGIN_ENABLED:-true}
+      RLM_PLUGIN_REQUIRED: ${RLM_PLUGIN_REQUIRED:-true}
+      RLM_PLUGIN_REF: ${RLM_PLUGIN_REF:-rlm-claude-code@rlm-claude-code}
+      RLM_PLUGIN_KEY: ${RLM_PLUGIN_KEY:-rlm-claude-code@rlm-claude-code}
+      RLM_PLUGIN_NAME: ${RLM_PLUGIN_NAME:-rlm-claude-code}
+      RLM_PLUGIN_SCOPE: ${RLM_PLUGIN_SCOPE:-user}
+      RLM_MARKETPLACE_SOURCE: ${RLM_MARKETPLACE_SOURCE:-rand/rlm-claude-code}
+      RLM_PLUGIN_BUILD_HOOKS: ${RLM_PLUGIN_BUILD_HOOKS:-true}
+      RLM_PLUGIN_SYNC_REQUIRED: ${RLM_PLUGIN_SYNC_REQUIRED:-true}
+      RLM_PLUGIN_VERIFY_REQUIRED: ${RLM_PLUGIN_VERIFY_REQUIRED:-true}
+      RLM_ACTIVATION_MODE: ${RLM_ACTIVATION_MODE:-complexity}
+      RLM_CONFIG_PATH: /home/agent/.claude/rlm-config.json
+      RLM_DEBUG: ${RLM_DEBUG:-0}
     secrets:
       - GH_TOKEN
     volumes:
@@ -40,6 +53,19 @@ services:
       GIT_COMMIT_SIGNING: ${GIT_COMMIT_SIGNING:-off}
       GIT_SIGNING_KEY: ${GIT_SIGNING_KEY:-}
       SIGNING_KEYS_MOUNT: /mnt/host-keys
+      RLM_PLUGIN_ENABLED: ${RLM_PLUGIN_ENABLED:-true}
+      RLM_PLUGIN_REQUIRED: ${RLM_PLUGIN_REQUIRED:-true}
+      RLM_PLUGIN_REF: ${RLM_PLUGIN_REF:-rlm-claude-code@rlm-claude-code}
+      RLM_PLUGIN_KEY: ${RLM_PLUGIN_KEY:-rlm-claude-code@rlm-claude-code}
+      RLM_PLUGIN_NAME: ${RLM_PLUGIN_NAME:-rlm-claude-code}
+      RLM_PLUGIN_SCOPE: ${RLM_PLUGIN_SCOPE:-user}
+      RLM_MARKETPLACE_SOURCE: ${RLM_MARKETPLACE_SOURCE:-rand/rlm-claude-code}
+      RLM_PLUGIN_BUILD_HOOKS: ${RLM_PLUGIN_BUILD_HOOKS:-true}
+      RLM_PLUGIN_SYNC_REQUIRED: ${RLM_PLUGIN_SYNC_REQUIRED:-true}
+      RLM_PLUGIN_VERIFY_REQUIRED: ${RLM_PLUGIN_VERIFY_REQUIRED:-true}
+      RLM_ACTIVATION_MODE: ${RLM_ACTIVATION_MODE:-complexity}
+      RLM_CONFIG_PATH: /home/agent/.claude/rlm-config.json
+      RLM_DEBUG: ${RLM_DEBUG:-0}
     secrets:
       - GH_TOKEN
     volumes:

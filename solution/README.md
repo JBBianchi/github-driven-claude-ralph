@@ -34,6 +34,7 @@ All reasoning happens inside Claude Code (invoked via `claude -p` in headless mo
 - **Docker** and **Docker Compose**
 - A **GitHub personal access token** with `repo` scope
 - A **Claude credentials file** (`~/.claude/.credentials.json`)
+- Outbound network access from containers (for RLM plugin bootstrap on startup)
 
 ## Quick start
 
@@ -71,14 +72,42 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 |----------|---------|-------------|
 | `BASE_BRANCH` | `main` | Branch to sync against |
 | `PLANNER_POLL_INTERVAL_SECONDS` | `120` | Seconds between planner iterations |
-| `PLANNER_MAX_TURNS` | `30` | Max Claude tool-use turns per planner invocation |
+| `PLANNER_MAX_TURNS` | `50` | Max Claude tool-use turns per planner invocation |
 | `EXECUTOR_ID` | `executor-01` | Unique ID for this executor instance |
 | `EXECUTOR_POLL_INTERVAL_SECONDS` | `60` | Seconds between executor iterations |
-| `EXECUTOR_MAX_TURNS` | `50` | Max Claude tool-use turns per executor invocation |
+| `EXECUTOR_MAX_TURNS` | `100` | Max Claude tool-use turns per executor invocation |
 | `VALIDATION_COMMAND` | _(empty)_ | Command for Claude to run before committing (e.g. `npm test`) |
 | `GIT_COMMIT_SIGNING` | `off` | Commit signing mode: `off`, `gpg`, or `ssh` |
 | `GIT_SIGNING_KEY` | _(empty)_ | GPG key ID (required when `gpg` mode) |
 | `SIGNING_KEYS_PATH` | `./secrets` | Host path to signing key files |
+| `RLM_PLUGIN_ENABLED` | `true` | Enable RLM plugin bootstrap in container startup |
+| `RLM_PLUGIN_REQUIRED` | `true` | Fail container startup if RLM setup fails |
+| `RLM_PLUGIN_REF` | `rlm-claude-code@rlm-claude-code` | Plugin reference passed to `claude plugin install` |
+| `RLM_PLUGIN_KEY` | `rlm-claude-code@rlm-claude-code` | Plugin key used in `~/.claude/settings.user.json` |
+| `RLM_PLUGIN_NAME` | `rlm-claude-code` | Plugin short name used when checking installed plugins |
+| `RLM_PLUGIN_SCOPE` | `user` | Claude plugin scope used during install |
+| `RLM_MARKETPLACE_SOURCE` | `rand/rlm-claude-code` | Marketplace source used by `claude plugin marketplace add` |
+| `RLM_PLUGIN_BUILD_HOOKS` | `true` | Build Go hook binaries (`session-init`, `complexity-check`, `trajectory-save`) when missing |
+| `RLM_PLUGIN_SYNC_REQUIRED` | `true` | If `true`, fail startup when dependency sync is needed and `uv sync` fails |
+| `RLM_PLUGIN_VERIFY_REQUIRED` | `true` | If `true`, fail startup when `rlm_core` import or hook health check fails |
+| `RLM_ACTIVATION_MODE` | `complexity` | Initial activation mode written to RLM config on first bootstrap |
+| `RLM_DEBUG` | `0` | Enable verbose RLM debug output (`1` to enable) |
+
+## RLM plugin integration
+
+The planner and executor now bootstrap `rand/rlm-claude-code` during `entrypoint.sh` startup:
+
+1. Ensures `uv` is available.
+2. Installs `rlm-claude-code@rlm-claude-code` only when not already installed.
+3. Builds Go hook binaries when missing (`RLM_PLUGIN_BUILD_HOOKS=true`), so hook-dispatch does not fall back to buggy Python scripts.
+4. Creates plugin virtualenv when needed, then skips `uv sync` when `rlm_core` is already importable.
+5. Runs `uv sync` only when required, then verifies `rlm_core` import.
+6. Copies and runs `merge-plugin-hooks.py` to merge plugin hooks into `~/.claude/settings.json`.
+7. Writes a default `~/.claude/rlm-config.json` (only when missing), using `RLM_ACTIVATION_MODE`.
+8. Runs plugin `hook-dispatch.sh session-init` with JSON input as a startup health check.
+9. Mirrors entrypoint output to `/workspace/logs/entrypoint-<role>.log` for startup debugging.
+
+If `RLM_PLUGIN_REQUIRED=true`, startup fails fast when any RLM setup step fails.
 
 ## Commit signing
 
@@ -141,7 +170,7 @@ solution/
     exec.md           Executor: implement code changes
     review.md         Executor: diagnose and fix CI failures
   scripts/
-    entrypoint.sh     Credential setup (git, gh, gpg/ssh, Claude)
+    entrypoint.sh     Credential setup + RLM plugin bootstrap + Claude health checks
   Dockerfile          Multi-stage build (node:20-slim)
   docker-compose.yml  Planner + executor services
   .env.example        Configuration template
@@ -186,7 +215,7 @@ npx vitest
 
 ## Safety controls
 
-- **Max turns per invocation**: Caps Claude's tool calls (30 planner, 50 executor)
+- **Max turns per invocation**: Caps Claude's tool calls (50 planner, 100 executor)
 - **30-minute timeout**: Hard kill per Claude invocation
 - **Review loop**: Max 3 CI fix attempts before marking `blocked`
 - **Circuit breaker**: 3 consecutive iteration failures on the same task marks it `blocked`
@@ -194,3 +223,4 @@ npx vitest
 - **Nonce-based claiming**: Prevents two executors from working the same task
 - **Non-root container**: Runs as `agent` user inside Docker
 - **Read-only key mounts**: Signing keys are mounted read-only, copied with proper permissions
+- **RLM fail-fast mode**: Optional startup hard-fail when plugin setup is required (`RLM_PLUGIN_REQUIRED=true`)
