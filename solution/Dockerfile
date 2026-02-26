@@ -4,9 +4,17 @@ ARG CLAUDE_CODE_VERSION=latest
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git gh gpg gpg-agent jq curl ca-certificates openssh-client \
+    python3 python3-venv python3-dev \
+    build-essential pkg-config libssl-dev golang-go \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable \
+    && ln -sf /root/.cargo/bin/cargo /usr/local/bin/cargo \
+    && ln -sf /root/.cargo/bin/rustc /usr/local/bin/rustc
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv /usr/local/bin/uv \
+    && chmod +x /usr/local/bin/uv
 
 RUN useradd -m -s /bin/bash agent
 RUN mkdir -p /workspace/repo /workspace/worktrees /workspace/state /workspace/logs \

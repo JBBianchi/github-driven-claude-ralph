@@ -107,6 +107,62 @@ describe('syncRepo', () => {
     // Should NOT attempt clone — only 2 calls (rev-parse + fetch)
     expect(mockExeca).toHaveBeenCalledTimes(2);
   });
+
+  it('retries sync on git ref lock contention and then succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      const lockError = new Error('cannot lock ref') as Error & { stderr: string };
+      lockError.stderr =
+        "error: cannot lock ref 'refs/remotes/origin/main': is at abc but expected def";
+
+      mockExeca.mockResolvedValueOnce({ stdout: '.git', stderr: '', exitCode: 0 } as any);
+      mockExeca.mockRejectedValueOnce(lockError);
+      mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+      mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+      const promise = syncRepo(makeConfig());
+      await vi.runAllTimersAsync();
+      await promise;
+
+      expect(mockExeca).toHaveBeenCalledTimes(4);
+      expect(mockExeca).toHaveBeenCalledWith(
+        'git',
+        ['fetch', 'origin'],
+        expect.objectContaining({ cwd: '/workspace/repo' }),
+      );
+      expect(mockExeca).toHaveBeenCalledWith(
+        'git',
+        ['reset', '--hard', 'origin/main'],
+        expect.objectContaining({ cwd: '/workspace/repo' }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('throws after max retry attempts on persistent ref lock contention', async () => {
+    vi.useFakeTimers();
+    try {
+      const lockError = new Error('cannot lock ref') as Error & { stderr: string };
+      lockError.stderr =
+        "error: cannot lock ref 'refs/remotes/origin/main': is at abc but expected def";
+
+      mockExeca.mockResolvedValueOnce({ stdout: '.git', stderr: '', exitCode: 0 } as any);
+      mockExeca.mockRejectedValueOnce(lockError);
+      mockExeca.mockRejectedValueOnce(lockError);
+      mockExeca.mockRejectedValueOnce(lockError);
+      mockExeca.mockRejectedValueOnce(lockError);
+      mockExeca.mockRejectedValueOnce(lockError);
+
+      const promise = syncRepo(makeConfig());
+      const expectation = expect(promise).rejects.toThrow('cannot lock ref');
+      await vi.runAllTimersAsync();
+      await expectation;
+      expect(mockExeca).toHaveBeenCalledTimes(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('ensureWorktree', () => {
