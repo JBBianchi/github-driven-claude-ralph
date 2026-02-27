@@ -381,6 +381,15 @@ describe('getPRStatus', () => {
       stderr: '',
       exitCode: 0,
     } as any);
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        { name: 'build (ubuntu-latest)', state: 'SUCCESS' },
+        { name: 'build (windows-latest)', state: 'SUCCESS' },
+        { name: 'build (macos-latest)', state: 'SUCCESS' },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    } as any);
 
     const status = await getPRStatus(makeConfig(), 56);
     expect(status).toBe('mergeable');
@@ -401,7 +410,7 @@ describe('getPRStatus', () => {
     expect(status).toBe('failing');
   });
 
-  it('returns pending when checks pass but review is not approved', async () => {
+  it('returns mergeable when checks pass and no review decision is present', async () => {
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify({
         mergeable: 'MERGEABLE',
@@ -411,9 +420,114 @@ describe('getPRStatus', () => {
       stderr: '',
       exitCode: 0,
     } as any);
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        { name: 'build (ubuntu-latest)', state: 'SUCCESS' },
+        { name: 'build (windows-latest)', state: 'SUCCESS' },
+        { name: 'build (macos-latest)', state: 'SUCCESS' },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('mergeable');
+  });
+
+  it('returns pending when review is required', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: 'REVIEW_REQUIRED',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        { name: 'build (ubuntu-latest)', state: 'SUCCESS' },
+        { name: 'build (windows-latest)', state: 'SUCCESS' },
+        { name: 'build (macos-latest)', state: 'SUCCESS' },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    } as any);
 
     const status = await getPRStatus(makeConfig(), 56);
     expect(status).toBe('pending');
+  });
+
+  it('returns pending when changes are requested', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: 'CHANGES_REQUESTED',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        { name: 'build (ubuntu-latest)', state: 'SUCCESS' },
+        { name: 'build (windows-latest)', state: 'SUCCESS' },
+        { name: 'build (macos-latest)', state: 'SUCCESS' },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('pending');
+  });
+
+  it('returns pending when any check is still in progress despite CLEAN merge state', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: '',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        { name: 'build (ubuntu-latest)', state: 'IN_PROGRESS' },
+        { name: 'build (windows-latest)', state: 'SUCCESS' },
+        { name: 'build (macos-latest)', state: 'SUCCESS' },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('pending');
+  });
+
+  it('returns failing when any check has failed despite CLEAN merge state', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: '',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        { name: 'build (ubuntu-latest)', state: 'FAILURE' },
+        { name: 'build (windows-latest)', state: 'SUCCESS' },
+        { name: 'build (macos-latest)', state: 'SUCCESS' },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('failing');
   });
 
   it('returns pending when merge state is blocked', async () => {

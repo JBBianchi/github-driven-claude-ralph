@@ -316,6 +316,58 @@ function deriveChecksStatusFromMergeState(mergeStateStatus: string): 'passing' |
   return 'pending';
 }
 
+function deriveChecksStatusFromCheckRuns(
+  checks: Array<{ state?: string }>,
+): 'passing' | 'failing' | 'pending' {
+  if (checks.length === 0) return 'passing';
+
+  let hasPending = false;
+  for (const check of checks) {
+    const state = (check.state ?? '').trim().toUpperCase();
+    if (state.length === 0) {
+      hasPending = true;
+      continue;
+    }
+
+    if (state === 'FAILURE' || state === 'FAILED' || state === 'CANCELLED' || state === 'TIMED_OUT') {
+      return 'failing';
+    }
+
+    if (state === 'IN_PROGRESS' || state === 'PENDING' || state === 'QUEUED' || state === 'WAITING') {
+      hasPending = true;
+    }
+  }
+
+  return hasPending ? 'pending' : 'passing';
+}
+
+async function getPRChecksStatus(config: Config, prNumber: number): Promise<'passing' | 'failing' | 'pending'> {
+  try {
+    const { stdout } = await gh([
+      'pr', 'checks', String(prNumber),
+      '--repo', config.repoSlug,
+      '--json', 'state',
+    ]);
+
+    const checks = JSON.parse(stdout) as Array<{ state?: string }>;
+    return deriveChecksStatusFromCheckRuns(checks);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    // GitHub may temporarily return this before check suites materialize.
+    if (/no checks reported on the/i.test(message)) {
+      return 'pending';
+    }
+
+    // Conservative fallback: if checks cannot be read, do not merge yet.
+    if (/resource not accessible by personal access token/i.test(message)) {
+      return 'pending';
+    }
+
+    throw error;
+  }
+}
+
 export async function getPRStatus(config: Config, prNumber: number): Promise<PRStatus> {
   const { stdout } = await gh([
     'pr', 'view', String(prNumber),
@@ -332,13 +384,19 @@ export async function getPRStatus(config: Config, prNumber: number): Promise<PRS
   const mergeStateStatus = (pr.mergeStateStatus ?? 'UNKNOWN').toUpperCase();
   if (pr.mergeable === 'CONFLICTING' || mergeStateStatus === 'DIRTY') return 'conflicting';
 
-  const checksStatus = deriveChecksStatusFromMergeState(mergeStateStatus);
+  const mergeStateChecks = deriveChecksStatusFromMergeState(mergeStateStatus);
+  if (mergeStateChecks === 'failing') return 'failing';
+  if (mergeStateChecks === 'pending') return 'pending';
+
+  const checksStatus = await getPRChecksStatus(config, prNumber);
   if (checksStatus === 'failing') return 'failing';
   if (checksStatus === 'pending') return 'pending';
 
-  // Only merge when checks pass and a reviewer has approved.
+  // Merge when checks pass unless GitHub reports an explicitly blocking review state.
   const reviewDecision = (pr.reviewDecision ?? '').trim().toUpperCase();
-  if (reviewDecision !== 'APPROVED') return 'pending';
+  if (reviewDecision === 'REVIEW_REQUIRED' || reviewDecision === 'CHANGES_REQUESTED') {
+    return 'pending';
+  }
 
   return 'mergeable';
 }
