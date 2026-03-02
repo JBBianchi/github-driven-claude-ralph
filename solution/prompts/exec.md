@@ -18,7 +18,6 @@ You are the executor agent. You implement code changes for a single task.
 8. Create a PR (or update existing) using `gh pr create`:
    - Title: concise description of the change
    - Body: what changed, why, link to task issue (#<number>)
-   - Add label `task:<task_id>`
 
 ## Rules
 - Make focused, minimal changes. Do not refactor unrelated code.
