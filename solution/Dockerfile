@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git gpg gpg-agent jq curl ca-certificates openssh-client \
     python3 python3-venv python3-dev \
     build-essential pkg-config libssl-dev golang-go \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/apt/keyrings \
@@ -26,7 +27,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uv /usr/local/bin/uv \
     && chmod +x /usr/local/bin/uv
 
-RUN useradd -m -s /bin/bash agent
+RUN useradd -m -s /bin/bash agent \
+    && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent \
+    && chmod 0440 /etc/sudoers.d/agent
 RUN mkdir -p /workspace/repo /workspace/worktrees /workspace/state /workspace/logs \
     && chown -R agent:agent /workspace
 
@@ -61,5 +64,6 @@ WORKDIR /workspace
 
 ENV DISABLE_AUTOUPDATER=1
 ENV DISABLE_NONESSENTIAL_TRAFFIC=1
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true
 
 ENTRYPOINT ["/opt/agent/scripts/entrypoint.sh"]

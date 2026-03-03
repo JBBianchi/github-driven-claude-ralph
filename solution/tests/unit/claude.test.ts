@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { execa } from 'execa';
+import { PassThrough } from 'node:stream';
 import { invokeClaude } from '../../src/claude.js';
-import type { ClaudeInvocation } from '../../src/types.js';
+import type { ClaudeInvocation, Logger } from '../../src/types.js';
 
 vi.mock('execa', () => ({
   execa: vi.fn(),
@@ -19,9 +20,18 @@ function makeInvocation(overrides: Partial<ClaudeInvocation> = {}): ClaudeInvoca
   };
 }
 
+function makeLogger(): Logger {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+}
+
 describe('invokeClaude', () => {
   beforeEach(() => {
     mockExeca.mockReset();
+    vi.useRealTimers();
   });
 
   it('always uses json output format internally', async () => {
@@ -180,5 +190,167 @@ describe('invokeClaude', () => {
     const result = await invokeClaude(makeInvocation());
 
     expect(result.durationMs).toBeGreaterThanOrEqual(40);
+  });
+
+  it('logs lifecycle messages when logger is provided', async () => {
+    const logger = makeLogger();
+    mockExeca.mockResolvedValueOnce({ stdout: '{}', stderr: '', exitCode: 0 } as any);
+
+    await invokeClaude(makeInvocation({ logger, activity: 'executor-implementation' }));
+
+    expect(logger.info).toHaveBeenCalledWith(
+      'Claude invocation started',
+      expect.objectContaining({
+        activity: 'executor-implementation',
+        timeoutMs: 1800000,
+      }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      'Claude invocation succeeded',
+      expect.objectContaining({
+        activity: 'executor-implementation',
+        durationMs: expect.any(Number),
+      }),
+    );
+  });
+
+  it('logs heartbeat messages for long-running invocation', async () => {
+    vi.useFakeTimers();
+    const logger = makeLogger();
+    mockExeca.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 65000));
+      return { stdout: '{}', stderr: '', exitCode: 0 } as any;
+    });
+
+    const pending = invokeClaude(makeInvocation({ logger, activity: 'review' }));
+    await vi.advanceTimersByTimeAsync(70000);
+    await pending;
+
+    expect(logger.info).toHaveBeenCalledWith(
+      'Claude invocation heartbeat',
+      expect.objectContaining({ activity: 'review' }),
+    );
+  });
+
+  it('kills subprocess after consecutive stale heartbeats', async () => {
+    vi.useFakeTimers();
+    const logger = makeLogger();
+    const killFn = vi.fn();
+
+    let rejectProcess: ((reason: Error) => void) | null = null;
+    const completion = new Promise<{ stdout: string; stderr: string; exitCode: number }>((_resolve, reject) => {
+      rejectProcess = reject;
+    });
+
+    const subprocess = Object.assign(completion, {
+      pid: 9999,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: killFn,
+    });
+    mockExeca.mockReturnValueOnce(subprocess as any);
+
+    const pending = invokeClaude(makeInvocation({ logger, activity: 'stuck-task' }));
+
+    // Advance through 10 stale heartbeats (10 × 30s = 300s)
+    // The first heartbeat at 30s is never stale (first observation), so we need 11 intervals.
+    await vi.advanceTimersByTimeAsync(11 * 30_000);
+
+    expect(killFn).toHaveBeenCalledWith('SIGTERM');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Claude invocation stalled — killing subprocess',
+      expect.objectContaining({
+        activity: 'stuck-task',
+        claudePid: 9999,
+      }),
+    );
+
+    // Clean up: reject the promise so invokeClaude finishes
+    const error = new Error('killed') as any;
+    error.stderr = '';
+    rejectProcess?.(error);
+    subprocess.stdout.end();
+    subprocess.stderr.end();
+    await pending;
+  });
+
+  it('resets stale counter when process snapshot changes', async () => {
+    vi.useFakeTimers();
+    const logger = makeLogger();
+    const killFn = vi.fn();
+    const stdoutStream = new PassThrough();
+
+    let resolveProcess: ((value: { stdout: string; stderr: string; exitCode: number }) => void) | null = null;
+    const completion = new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
+      resolveProcess = resolve;
+    });
+
+    const subprocess = Object.assign(completion, {
+      pid: 8888,
+      stdout: stdoutStream,
+      stderr: new PassThrough(),
+      kill: killFn,
+    });
+    mockExeca.mockReturnValueOnce(subprocess as any);
+
+    const pending = invokeClaude(makeInvocation({ logger, activity: 'progressing-task' }));
+
+    // Advance 8 stale heartbeats (just under the limit of 10)
+    await vi.advanceTimersByTimeAsync(9 * 30_000);
+    expect(killFn).not.toHaveBeenCalled();
+
+    // Write some output to reset the stale counter
+    stdoutStream.write('progress');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(killFn).not.toHaveBeenCalled();
+
+    // Advance another 8 stale heartbeats — still under limit since counter reset
+    await vi.advanceTimersByTimeAsync(8 * 30_000);
+    expect(killFn).not.toHaveBeenCalled();
+
+    // Clean up
+    resolveProcess?.({ stdout: '{}', stderr: '', exitCode: 0 });
+    stdoutStream.end();
+    subprocess.stderr.end();
+    await pending;
+  });
+
+  it('tracks streamed stdout/stderr byte counters in heartbeat logs', async () => {
+    vi.useFakeTimers();
+    const logger = makeLogger();
+    const stdoutStream = new PassThrough();
+    const stderrStream = new PassThrough();
+
+    let resolveProcess: ((value: { stdout: string; stderr: string; exitCode: number }) => void) | null = null;
+    const completion = new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
+      resolveProcess = resolve;
+    });
+
+    const subprocess = Object.assign(completion, {
+      pid: 4321,
+      stdout: stdoutStream,
+      stderr: stderrStream,
+    });
+    mockExeca.mockReturnValueOnce(subprocess as any);
+
+    const pending = invokeClaude(makeInvocation({ logger, activity: 'executor-implementation' }));
+    stdoutStream.write('hello');
+    stderrStream.write('oops');
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    resolveProcess?.({ stdout: '{}', stderr: '', exitCode: 0 });
+    stdoutStream.end();
+    stderrStream.end();
+    await pending;
+
+    expect(logger.info).toHaveBeenCalledWith(
+      'Claude invocation heartbeat',
+      expect.objectContaining({
+        activity: 'executor-implementation',
+        claudePid: 4321,
+        stdoutBytes: 5,
+        stderrBytes: 4,
+      }),
+    );
   });
 });

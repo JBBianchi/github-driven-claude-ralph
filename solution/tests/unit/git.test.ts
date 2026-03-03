@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { execa } from 'execa';
-import { syncRepo, ensureWorktree, pushBranch, makeBranchName } from '../../src/git.js';
+import { syncRepo, ensureWorktree, pushBranch, makeBranchName, mergeBase, abortMerge } from '../../src/git.js';
 import type { Config } from '../../src/types.js';
 
 vi.mock('execa', () => ({
@@ -25,6 +25,10 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: '',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    autonomousMode: false,
+    autonomousMaxFeatures: 3,
+    autonomousFocus: '',
+    maxConcurrentPlans: 0,
     ...overrides,
   };
 }
@@ -229,6 +233,107 @@ describe('pushBranch', () => {
     mockExeca.mockRejectedValueOnce(new Error('push rejected'));
 
     await expect(pushBranch('/workspace/worktrees/42')).rejects.toThrow('push rejected');
+  });
+});
+
+describe('mergeBase', () => {
+  beforeEach(() => {
+    mockExeca.mockReset();
+  });
+
+  it('fetches origin and merges base branch, returns true on clean merge', async () => {
+    // fetch
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    // merge
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+    const result = await mergeBase(makeConfig(), '/workspace/worktrees/42');
+
+    expect(result).toBe(true);
+    expect(mockExeca).toHaveBeenCalledWith(
+      'git',
+      ['fetch', 'origin'],
+      expect.objectContaining({ cwd: '/workspace/worktrees/42' }),
+    );
+    expect(mockExeca).toHaveBeenCalledWith(
+      'git',
+      ['merge', 'origin/main', '--no-edit'],
+      expect.objectContaining({ cwd: '/workspace/worktrees/42' }),
+    );
+  });
+
+  it('uses config.baseBranch for merge target', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+    await mergeBase(makeConfig({ baseBranch: 'develop' }), '/workspace/worktrees/42');
+
+    expect(mockExeca).toHaveBeenCalledWith(
+      'git',
+      ['merge', 'origin/develop', '--no-edit'],
+      expect.any(Object),
+    );
+  });
+
+  it('returns false when merge has conflicts in stderr', async () => {
+    const conflictError = new Error('merge conflict') as Error & { stderr: string; stdout: string };
+    conflictError.stderr = 'CONFLICT (content): Merge conflict in src/app.ts\nAutomatic merge failed; fix conflicts and then commit the result.';
+    conflictError.stdout = '';
+
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    mockExeca.mockRejectedValueOnce(conflictError);
+
+    const result = await mergeBase(makeConfig(), '/workspace/worktrees/42');
+
+    expect(result).toBe(false);
+  });
+
+  it('returns false when merge has conflicts in stdout', async () => {
+    const conflictError = new Error('merge conflict') as Error & { stderr: string; stdout: string };
+    conflictError.stderr = '';
+    conflictError.stdout = 'CONFLICT (content): Merge conflict in src/app.ts';
+
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    mockExeca.mockRejectedValueOnce(conflictError);
+
+    const result = await mergeBase(makeConfig(), '/workspace/worktrees/42');
+
+    expect(result).toBe(false);
+  });
+
+  it('throws on non-conflict merge errors', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    mockExeca.mockRejectedValueOnce(new Error('fatal: not a git repository'));
+
+    await expect(mergeBase(makeConfig(), '/workspace/worktrees/42')).rejects.toThrow(
+      'fatal: not a git repository',
+    );
+  });
+});
+
+describe('abortMerge', () => {
+  beforeEach(() => {
+    mockExeca.mockReset();
+  });
+
+  it('calls git merge --abort with correct cwd', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+    await abortMerge('/workspace/worktrees/42');
+
+    expect(mockExeca).toHaveBeenCalledWith(
+      'git',
+      ['merge', '--abort'],
+      expect.objectContaining({ cwd: '/workspace/worktrees/42' }),
+    );
+  });
+
+  it('propagates error on abort failure', async () => {
+    mockExeca.mockRejectedValueOnce(new Error('There is no merge to abort'));
+
+    await expect(abortMerge('/workspace/worktrees/42')).rejects.toThrow(
+      'There is no merge to abort',
+    );
   });
 });
 

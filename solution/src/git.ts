@@ -88,6 +88,51 @@ export async function pushBranch(worktreePath: string): Promise<void> {
   await execa('git', ['push', '-u', 'origin', 'HEAD'], { cwd: worktreePath });
 }
 
+/**
+ * Merges the base branch into the current worktree branch.
+ * Fetches origin first, then attempts `git merge origin/<baseBranch> --no-edit`.
+ * @param config - Application configuration (uses baseBranch).
+ * @param worktreePath - Path to the git worktree.
+ * @returns `true` if the merge was clean, `false` if there are conflicts to resolve.
+ */
+export async function mergeBase(config: Config, worktreePath: string): Promise<boolean> {
+  await execa('git', ['fetch', 'origin'], { cwd: worktreePath });
+
+  try {
+    await execa('git', ['merge', `origin/${config.baseBranch}`, '--no-edit'], { cwd: worktreePath });
+    return true;
+  } catch (error: unknown) {
+    const stderr =
+      typeof error === 'object' &&
+      error !== null &&
+      'stderr' in error &&
+      typeof (error as { stderr?: unknown }).stderr === 'string'
+        ? (error as { stderr: string }).stderr
+        : '';
+    const stdout =
+      typeof error === 'object' &&
+      error !== null &&
+      'stdout' in error &&
+      typeof (error as { stdout?: unknown }).stdout === 'string'
+        ? (error as { stdout: string }).stdout
+        : '';
+
+    if (stderr.includes('CONFLICT') || stdout.includes('CONFLICT')) {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+/**
+ * Aborts an in-progress merge in the worktree.
+ * @param worktreePath - Path to the git worktree.
+ */
+export async function abortMerge(worktreePath: string): Promise<void> {
+  await execa('git', ['merge', '--abort'], { cwd: worktreePath });
+}
+
 export function makeBranchName(taskId: number, title: string): string {
   const slug = title
     .toLowerCase()

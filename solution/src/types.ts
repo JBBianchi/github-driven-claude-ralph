@@ -16,6 +16,14 @@ export interface Config {
   validationCommand: string;
   gitAuthorName: string;
   gitAuthorEmail: string;
+  /** Whether autonomous mode is enabled for the planner. */
+  autonomousMode: boolean;
+  /** Maximum features to create per autonomous analysis. */
+  autonomousMaxFeatures: number;
+  /** Optional focus area for autonomous analysis (empty = open-ended). */
+  autonomousFocus: string;
+  /** Max plans with status:todo tasks at once (0 = unlimited). */
+  maxConcurrentPlans: number;
 }
 
 export interface GitHubIssue {
@@ -56,6 +64,8 @@ export interface ClaudeInvocation {
   outputFormat: 'text' | 'json';
   workingDirectory: string;
   resumeSessionId?: string;
+  logger?: Logger;
+  activity?: string;
 }
 
 export interface ClaudeResult {
@@ -71,10 +81,23 @@ export interface ExecutorState {
   consecutiveFailures?: number;
 }
 
+/**
+ * Machine-readable claim outcome reason.
+ */
+export type ClaimFailureReason =
+  | 'lost-race'
+  | 'missing-claim-label'
+  | 'missing-in-progress-label';
+
+/**
+ * Result of a task claim attempt.
+ */
 export interface ClaimAttempt {
   taskId: number;
   nonce: string;
   success: boolean;
+  reason?: ClaimFailureReason;
+  ownerExecutorId?: string;
 }
 
 export interface Logger {

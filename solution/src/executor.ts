@@ -1,4 +1,4 @@
-import { syncRepo, ensureWorktree, pushBranch, makeBranchName } from './git.js';
+import { syncRepo, ensureWorktree, pushBranch, makeBranchName, mergeBase, abortMerge } from './git.js';
 import {
   listIssues,
   claimTask,
@@ -19,7 +19,7 @@ import {
   clearActiveTask,
   recoverStateFromGitHub,
 } from './state.js';
-import { LABELS, claimedByLabel } from './labels.js';
+import { CLAIMED_BY_PREFIX, LABELS, claimedByLabel } from './labels.js';
 import type { Config, Logger, GitHubIssue, GitHubPR, ExecutorState, PRStatus } from './types.js';
 
 const PROMPTS_DIR = '/opt/agent/prompts';
@@ -27,8 +27,20 @@ const MAX_REVIEW_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_FAILURES = 3;
 const CLAUDE_AUTH_FAILURE_PREFIX = 'Claude authentication failed:';
 
-async function listRunnableTasks(config: Config): Promise<GitHubIssue[]> {
-  return listIssues(config, [LABELS.task, LABELS.statusTodo]);
+async function listRunnableTasks(config: Config, logger: Logger): Promise<GitHubIssue[]> {
+  const tasks = await listIssues(config, [LABELS.task, LABELS.statusTodo]);
+  const skipped = tasks.filter((task) => task.labels.some((label) => label.startsWith(CLAIMED_BY_PREFIX)));
+  if (skipped.length > 0) {
+    logger.warn('Skipping todo tasks with ownership labels', {
+      taskIds: skipped.map((task) => task.number),
+      claimLabels: skipped.map((task) => ({
+        taskId: task.number,
+        labels: task.labels.filter((label) => label.startsWith(CLAIMED_BY_PREFIX)),
+      })),
+    });
+  }
+
+  return tasks.filter((task) => task.labels.every((label) => !label.startsWith(CLAIMED_BY_PREFIX)));
 }
 
 function isFatalClaudeAuthError(error: unknown): boolean {
@@ -73,18 +85,54 @@ ${checkDetails}
 Diagnose the failures and fix the code.`;
 }
 
+export function buildConflictPrompt(
+  config: Config,
+  task: GitHubIssue,
+  pr: GitHubPR,
+  worktreePath: string,
+): string {
+  return `You are the Executor agent resolving merge conflicts for repository ${config.repoSlug}.
+Working directory: ${worktreePath}
+Task: #${task.number} — ${task.title}
+PR: #${pr.number}
+
+The base branch (${config.baseBranch}) has diverged from this feature branch, causing merge conflicts.
+A merge of origin/${config.baseBranch} has been started but has unresolved conflicts.
+
+Resolve all merge conflicts:
+1. Find all files with conflict markers (<<<<<<< , =======, >>>>>>>)
+2. Resolve each conflict by choosing the correct code or combining changes appropriately
+3. Stage resolved files with \`git add\`
+4. Complete the merge with \`git commit --no-edit\`
+
+Do NOT push — the orchestrator handles pushing.
+Do NOT modify workflow labels.`;
+}
+
 export async function pollForCIResult(
   config: Config,
   prNumber: number,
   timeoutMs: number,
   pollIntervalMs = 30_000,
+  logger?: Logger,
 ): Promise<PRStatus> {
+  const startedAt = Date.now();
   const deadline = Date.now() + timeoutMs;
+  logger?.info('CI poll started', { prNumber, timeoutMs, pollIntervalMs });
+
   while (Date.now() < deadline) {
     const status = await getPRStatus(config, prNumber);
-    if (status !== 'pending') return status;
+    const elapsedMs = Date.now() - startedAt;
+    const remainingMs = Math.max(0, deadline - Date.now());
+    logger?.info('CI poll heartbeat', { prNumber, status, elapsedMs, remainingMs });
+    if (status !== 'pending') {
+      logger?.info('CI poll completed', { prNumber, status, elapsedMs });
+      return status;
+    }
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
+
+  logger?.warn('CI poll timed out', { prNumber, timeoutMs, elapsedMs: Date.now() - startedAt });
   return 'pending';
 }
 
@@ -97,6 +145,7 @@ async function runReviewLoop(
 ): Promise<boolean> {
   for (let attempt = 0; attempt < MAX_REVIEW_ATTEMPTS; attempt++) {
     logger.info('Review attempt', { attempt: attempt + 1, maxAttempts: MAX_REVIEW_ATTEMPTS });
+    const attemptStartedAt = Date.now();
 
     const checkDetails = await getPRCheckDetails(config, pr.number);
     const prompt = buildReviewPrompt(config, task, pr, checkDetails);
@@ -107,6 +156,16 @@ async function runReviewLoop(
       maxTurns: config.maxTurnsPerRun,
       outputFormat: 'text',
       workingDirectory: worktreePath,
+      logger,
+      activity: 'executor-review',
+    });
+    logger.info('Review attempt Claude finished', {
+      attempt: attempt + 1,
+      taskId: task.number,
+      prNumber: pr.number,
+      success: reviewResult.success,
+      claudeDurationMs: reviewResult.durationMs,
+      attemptDurationMs: Date.now() - attemptStartedAt,
     });
     if (!reviewResult.success) {
       logger.warn('Claude review invocation failed; deferring to next iteration', {
@@ -118,7 +177,14 @@ async function runReviewLoop(
 
     await pushBranch(worktreePath);
 
-    const newStatus = await pollForCIResult(config, pr.number, 10 * 60 * 1000);
+    const newStatus = await pollForCIResult(config, pr.number, 10 * 60 * 1000, 30_000, logger);
+    logger.info('Review attempt CI evaluation finished', {
+      attempt: attempt + 1,
+      taskId: task.number,
+      prNumber: pr.number,
+      status: newStatus,
+      attemptDurationMs: Date.now() - attemptStartedAt,
+    });
 
     if (newStatus === 'mergeable') return true;
     if (newStatus !== 'failing') return false;
@@ -140,9 +206,14 @@ async function runReviewLoop(
 }
 
 export async function runExecutorIteration(config: Config, logger: Logger): Promise<void> {
+  const iterationStartedAt = Date.now();
+  let outcome = 'completed';
+  logger.info('Executor iteration started', { executorId: config.executorId });
+
   try {
     await syncRepo(config);
   } catch (error) {
+    outcome = 'sync-failed';
     logger.error('Failed to sync repo', { error: String(error) });
     return;
   }
@@ -161,6 +232,7 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       }
     }
   } catch (error) {
+    outcome = 'recovery-failed';
     logger.error('Recovery failed', { error: String(error) });
     return;
   }
@@ -168,8 +240,9 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
   try {
     // --- Phase 1: Claim if idle ---
     if (state.activeTaskId === null) {
-      const tasks = await listRunnableTasks(config);
+      const tasks = await listRunnableTasks(config, logger);
       if (tasks.length === 0) {
+        outcome = 'idle-no-tasks';
         logger.info('No tasks available. Sleeping.', {});
         return;
       }
@@ -179,7 +252,12 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       ));
       const claim = await claimTask(config, oldestTask.number);
       if (!claim.success) {
-        logger.warn('Claim failed, another executor won', { taskId: oldestTask.number });
+        outcome = 'claim-failed';
+        logger.warn('Claim failed', {
+          taskId: oldestTask.number,
+          reason: claim.reason ?? 'unknown',
+          ownerExecutorId: claim.ownerExecutorId ?? null,
+        });
         return;
       }
 
@@ -192,6 +270,7 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     const taskIssues = await listIssues(config, [LABELS.task]);
     const task = taskIssues.find((t) => t.number === state.activeTaskId);
     if (!task) {
+      outcome = 'stale-task-cleared';
       logger.warn('Active task issue not found among open tasks; clearing stale state', {
         taskId: state.activeTaskId,
       });
@@ -204,6 +283,12 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     await postWorkMapping(config, state.activeTaskId!, branch, worktreePath);
 
     // --- Phase 3: Implementation ---
+    logger.info('Implementation phase started', {
+      taskId: task.number,
+      branch,
+      worktreePath,
+    });
+    const implementationStartedAt = Date.now();
     const prompt = buildExecutorPrompt(config, task, branch, worktreePath);
     const result = await invokeClaude({
       prompt,
@@ -212,8 +297,17 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       outputFormat: 'json',
       workingDirectory: worktreePath,
       resumeSessionId: state.sessionId ?? undefined,
+      logger,
+      activity: 'executor-implementation',
+    });
+    logger.info('Implementation phase finished', {
+      taskId: task.number,
+      success: result.success,
+      claudeDurationMs: result.durationMs,
+      durationMs: Date.now() - implementationStartedAt,
     });
     if (!result.success) {
+      outcome = 'implementation-failed';
       logger.warn('Claude implementation invocation failed; deferring to next iteration', {
         taskId: state.activeTaskId,
       });
@@ -228,8 +322,9 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     // --- Phase 4: PR monitoring ---
     const pr = await findPRByBranch(config, branch);
     if (!pr) {
+      outcome = 'awaiting-pr';
       logger.info('No PR yet, will continue next iteration', { branch });
-      // Successful iteration — reset failure counter
+      // Successful iteration - reset failure counter
       if ((state.consecutiveFailures ?? 0) > 0) {
         state.consecutiveFailures = 0;
         writeExecutorState(config.executorId, state);
@@ -255,7 +350,8 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
         );
         await closeIssue(config, state.activeTaskId!);
         clearActiveTask(config.executorId);
-        logger.info('Task complete — PR merged', { taskId: state.activeTaskId, prNumber: pr.number });
+        outcome = 'merged';
+        logger.info('Task complete - PR merged', { taskId: state.activeTaskId, prNumber: pr.number });
         break;
 
       case 'failing': {
@@ -271,31 +367,98 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
           );
           await closeIssue(config, state.activeTaskId!);
           clearActiveTask(config.executorId);
-          logger.info('Task complete after review — PR merged', { taskId: state.activeTaskId, prNumber: pr.number });
+          outcome = 'merged-after-review';
+          logger.info('Task complete after review - PR merged', { taskId: state.activeTaskId, prNumber: pr.number });
         }
         break;
       }
 
       case 'pending':
+        outcome = 'checks-pending';
         logger.info('Checks pending, will re-check next iteration', { prNumber: pr.number });
         break;
 
-      case 'conflicting':
-        logger.warn('Merge conflicts detected', { prNumber: pr.number });
+      case 'conflicting': {
+        logger.info('Merge conflicts detected, attempting resolution', { prNumber: pr.number });
+
+        const mergeClean = await mergeBase(config, worktreePath);
+        if (!mergeClean) {
+          const conflictPrompt = buildConflictPrompt(config, task, pr, worktreePath);
+          const resolveResult = await invokeClaude({
+            prompt: conflictPrompt,
+            systemPromptFile: `${PROMPTS_DIR}/exec.md`,
+            maxTurns: config.maxTurnsPerRun,
+            outputFormat: 'text',
+            workingDirectory: worktreePath,
+            logger,
+            activity: 'executor-conflict-resolution',
+          });
+          if (!resolveResult.success) {
+            outcome = 'conflict-resolution-failed';
+            logger.warn('Claude conflict resolution failed; aborting merge', {
+              taskId: task.number,
+              prNumber: pr.number,
+            });
+            await abortMerge(worktreePath);
+            break;
+          }
+        }
+
+        await pushBranch(worktreePath);
+        logger.info('Conflicts resolved, branch pushed', { prNumber: pr.number });
+
+        const postConflictStatus = await pollForCIResult(config, pr.number, 10 * 60 * 1000, 30_000, logger);
+        if (postConflictStatus === 'mergeable') {
+          await mergePR(config, pr.number);
+          await editIssueLabels(
+            config,
+            state.activeTaskId!,
+            [LABELS.statusDone],
+            [LABELS.statusInProgress, claimedByLabel(config.executorId)],
+          );
+          await closeIssue(config, state.activeTaskId!);
+          clearActiveTask(config.executorId);
+          outcome = 'merged-after-conflict';
+          logger.info('Task complete after conflict resolution - PR merged', {
+            taskId: state.activeTaskId,
+            prNumber: pr.number,
+          });
+        } else if (postConflictStatus === 'failing') {
+          const fixed = await runReviewLoop(config, logger, task, pr, worktreePath);
+          if (fixed) {
+            await mergePR(config, pr.number);
+            await editIssueLabels(
+              config,
+              state.activeTaskId!,
+              [LABELS.statusDone],
+              [LABELS.statusInProgress, claimedByLabel(config.executorId)],
+            );
+            await closeIssue(config, state.activeTaskId!);
+            clearActiveTask(config.executorId);
+            outcome = 'merged-after-conflict-review';
+            logger.info('Task complete after conflict resolution + review - PR merged', {
+              taskId: state.activeTaskId,
+              prNumber: pr.number,
+            });
+          }
+        }
         break;
+      }
     }
 
-    // Successful iteration — reset failure counter
+    // Successful iteration - reset failure counter
     if ((state.consecutiveFailures ?? 0) > 0) {
       state.consecutiveFailures = 0;
       writeExecutorState(config.executorId, state);
     }
   } catch (error) {
     if (isFatalClaudeAuthError(error)) {
+      outcome = 'fatal-auth-error';
       logger.error('Fatal Claude authentication failure. Stopping executor loop.', { error: String(error) });
       throw error;
     }
 
+    outcome = 'iteration-error';
     logger.error('Executor iteration failed', { error: String(error) });
 
     // Circuit breaker: track consecutive failures for active tasks
@@ -304,6 +467,7 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       writeExecutorState(config.executorId, state);
 
       if (state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        outcome = 'circuit-breaker-blocked';
         logger.warn('Circuit breaker: task failed 3 consecutive iterations, marking blocked', {
           taskId: state.activeTaskId,
           consecutiveFailures: state.consecutiveFailures,
@@ -326,6 +490,12 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
         }
       }
     }
+  } finally {
+    logger.info('Executor iteration finished', {
+      executorId: config.executorId,
+      outcome,
+      durationMs: Date.now() - iterationStartedAt,
+    });
   }
 }
 
@@ -343,3 +513,4 @@ export async function runExecutorLoop(
 
   logger.info('Executor loop shutting down gracefully', {});
 }
+

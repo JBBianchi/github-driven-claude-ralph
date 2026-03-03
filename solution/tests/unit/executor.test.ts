@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { syncRepo, ensureWorktree, pushBranch, makeBranchName } from '../../src/git.js';
+import { syncRepo, ensureWorktree, pushBranch, makeBranchName, mergeBase, abortMerge } from '../../src/git.js';
 import {
   listIssues,
   claimTask,
@@ -25,6 +25,7 @@ import {
   runExecutorLoop,
   buildExecutorPrompt,
   buildReviewPrompt,
+  buildConflictPrompt,
   pollForCIResult,
 } from '../../src/executor.js';
 import type { Config, Logger, GitHubIssue, GitHubPR } from '../../src/types.js';
@@ -34,6 +35,8 @@ vi.mock('../../src/git.js', () => ({
   ensureWorktree: vi.fn(),
   pushBranch: vi.fn(),
   makeBranchName: vi.fn(),
+  mergeBase: vi.fn(),
+  abortMerge: vi.fn(),
 }));
 
 vi.mock('../../src/github.js', () => ({
@@ -65,6 +68,8 @@ const mockSyncRepo = vi.mocked(syncRepo);
 const mockEnsureWorktree = vi.mocked(ensureWorktree);
 const mockPushBranch = vi.mocked(pushBranch);
 const mockMakeBranchName = vi.mocked(makeBranchName);
+const mockMergeBase = vi.mocked(mergeBase);
+const mockAbortMerge = vi.mocked(abortMerge);
 const mockListIssues = vi.mocked(listIssues);
 const mockClaimTask = vi.mocked(claimTask);
 const mockFindPRByBranch = vi.mocked(findPRByBranch);
@@ -98,6 +103,10 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: 'npm test',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    autonomousMode: false,
+    autonomousMaxFeatures: 3,
+    autonomousFocus: '',
+    maxConcurrentPlans: 0,
     ...overrides,
   };
 }
@@ -142,6 +151,8 @@ describe('runExecutorIteration', () => {
     mockAddComment.mockResolvedValue(undefined);
     mockMergePR.mockResolvedValue(undefined);
     mockRequestCopilotReview.mockResolvedValue(true);
+    mockMergeBase.mockResolvedValue(true);
+    mockAbortMerge.mockResolvedValue(undefined);
     mockWriteExecutorState.mockReturnValue(undefined);
     mockClearActiveTask.mockReturnValue(undefined);
   });
@@ -205,6 +216,59 @@ describe('runExecutorIteration', () => {
     );
   });
 
+  it('skips todo tasks with claimed-by labels and claims oldest clean task', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: null, sessionId: null });
+    mockListIssues
+      .mockResolvedValueOnce([
+        makeTask({
+          number: 41,
+          title: 'Task: Already claimed',
+          labels: ['task', 'status:todo', 'claimed-by:executor-02'],
+        }),
+        makeTask({ number: 43, title: 'Task: Newer clean task' }),
+        makeTask({ number: 42, title: 'Task: Older clean task' }),
+      ])
+      .mockResolvedValueOnce([makeTask({ number: 42, title: 'Task: Older clean task' })]);
+    mockClaimTask.mockResolvedValue({ taskId: 42, nonce: 'abc', success: true });
+    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(null);
+
+    const logger = makeLogger();
+    await runExecutorIteration(makeConfig(), logger);
+
+    expect(mockClaimTask).toHaveBeenCalledWith(expect.anything(), 42);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Skipping todo tasks with ownership labels'),
+      expect.objectContaining({ taskIds: [41] }),
+    );
+  });
+
+  it('returns early when all todo tasks already have claimed-by labels', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: null, sessionId: null });
+    mockListIssues.mockResolvedValue([
+      makeTask({
+        number: 41,
+        title: 'Task: Already claimed 1',
+        labels: ['task', 'status:todo', 'claimed-by:executor-02'],
+      }),
+      makeTask({
+        number: 42,
+        title: 'Task: Already claimed 2',
+        labels: ['task', 'status:todo', 'claimed-by:executor-03'],
+      }),
+    ]);
+
+    const logger = makeLogger();
+    await runExecutorIteration(makeConfig(), logger);
+
+    expect(mockClaimTask).not.toHaveBeenCalled();
+    expect(mockInvokeClaude).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('No tasks'),
+      expect.anything(),
+    );
+  });
+
   it('returns early when no tasks available', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: null, sessionId: null });
     mockListIssues.mockResolvedValue([]);
@@ -216,6 +280,14 @@ describe('runExecutorIteration', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('No tasks'),
       expect.anything(),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      'Executor iteration started',
+      expect.objectContaining({ executorId: 'executor-01' }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      'Executor iteration finished',
+      expect.objectContaining({ outcome: 'idle-no-tasks' }),
     );
   });
 
@@ -421,20 +493,93 @@ describe('runExecutorIteration', () => {
     );
   });
 
-  it('logs warning when status is conflicting', async () => {
+  it('resolves conflicts with clean merge, pushes, and merges PR when CI passes', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
     mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
+    mockGetPRStatus
+      .mockResolvedValueOnce('conflicting')   // initial check
+      .mockResolvedValueOnce('mergeable');     // after push
+
+    mockMergeBase.mockResolvedValue(true); // clean merge
+
+    await runExecutorIteration(makeConfig(), makeLogger());
+
+    expect(mockMergeBase).toHaveBeenCalledWith(expect.anything(), '/workspace/worktrees/42');
+    expect(mockPushBranch).toHaveBeenCalledWith('/workspace/worktrees/42');
+    expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
+  });
+
+  it('invokes Claude to resolve merge conflicts and completes task', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude
+      .mockResolvedValueOnce({ success: true, durationMs: 100 })   // implementation
+      .mockResolvedValueOnce({ success: true, durationMs: 200 });  // conflict resolution
+    mockFindPRByBranch.mockResolvedValue(makePR());
+    mockGetPRStatus
+      .mockResolvedValueOnce('conflicting')
+      .mockResolvedValueOnce('mergeable');
+
+    mockMergeBase.mockResolvedValue(false); // conflicts
+
+    await runExecutorIteration(makeConfig(), makeLogger());
+
+    // Claude called twice: implementation + conflict resolution
+    expect(mockInvokeClaude).toHaveBeenCalledTimes(2);
+    const conflictCall = mockInvokeClaude.mock.calls[1][0];
+    expect(conflictCall.prompt).toContain('merge conflicts');
+    expect(conflictCall.prompt).toContain('#42');
+    expect(conflictCall.prompt).toContain('#56');
+    expect(mockPushBranch).toHaveBeenCalledWith('/workspace/worktrees/42');
+    expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
+  });
+
+  it('aborts merge and breaks when Claude fails to resolve conflicts', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude
+      .mockResolvedValueOnce({ success: true, durationMs: 100 })  // implementation
+      .mockResolvedValueOnce({ success: false, durationMs: 200 }); // conflict resolution failed
+    mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValue('conflicting');
+
+    mockMergeBase.mockResolvedValue(false); // conflicts
 
     const logger = makeLogger();
     await runExecutorIteration(makeConfig(), logger);
 
+    expect(mockAbortMerge).toHaveBeenCalledWith('/workspace/worktrees/42');
+    expect(mockPushBranch).not.toHaveBeenCalled();
+    expect(mockMergePR).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('conflict'),
+      expect.stringContaining('conflict resolution failed'),
       expect.anything(),
     );
+  });
+
+  it('enters review loop when CI fails after conflict resolution', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(makePR());
+    mockGetPRStatus
+      .mockResolvedValueOnce('conflicting')  // initial check
+      .mockResolvedValueOnce('failing')       // after conflict push
+      .mockResolvedValueOnce('mergeable');    // after review fix
+
+    mockMergeBase.mockResolvedValue(true); // clean merge
+    mockGetPRCheckDetails.mockResolvedValue('build: FAILURE');
+
+    await runExecutorIteration(makeConfig(), makeLogger());
+
+    // implementation + review = 2 Claude calls
+    expect(mockInvokeClaude).toHaveBeenCalledTimes(2);
+    expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
   });
 
   // --- Phase 5: Review loop ---
@@ -609,6 +754,22 @@ describe('buildReviewPrompt', () => {
   });
 });
 
+describe('buildConflictPrompt', () => {
+  it('includes task, PR, and base branch info', () => {
+    const task = makeTask();
+    const pr = makePR();
+    const config = makeConfig({ baseBranch: 'main' });
+    const prompt = buildConflictPrompt(config, task, pr, '/workspace/worktrees/42');
+
+    expect(prompt).toContain('#42');
+    expect(prompt).toContain('#56');
+    expect(prompt).toContain('main');
+    expect(prompt).toContain('merge conflicts');
+    expect(prompt).toContain('git add');
+    expect(prompt).toContain('git commit --no-edit');
+  });
+});
+
 describe('pollForCIResult', () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -651,6 +812,29 @@ describe('pollForCIResult', () => {
     const result = await pollForCIResult(makeConfig(), 56, 0, 1);
 
     expect(result).toBe('pending');
+  });
+
+  it('logs poll heartbeats and completion when logger is provided', async () => {
+    mockGetPRStatus
+      .mockResolvedValueOnce('pending')
+      .mockResolvedValueOnce('mergeable');
+    const logger = makeLogger();
+
+    const result = await pollForCIResult(makeConfig(), 56, 60_000, 1, logger);
+
+    expect(result).toBe('mergeable');
+    expect(logger.info).toHaveBeenCalledWith(
+      'CI poll started',
+      expect.objectContaining({ prNumber: 56 }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      'CI poll heartbeat',
+      expect.objectContaining({ prNumber: 56, status: 'pending' }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      'CI poll completed',
+      expect.objectContaining({ prNumber: 56, status: 'mergeable' }),
+    );
   });
 });
 

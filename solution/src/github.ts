@@ -67,6 +67,106 @@ async function gh(args: string[]): Promise<{ stdout: string }> {
   }
 }
 
+interface ClaimComment {
+  nonce: string;
+  executorId: string;
+}
+
+interface IssueClaimSnapshot {
+  labels: string[];
+  comments: Array<{ body: string }>;
+}
+
+function parseClaimComment(body: string): ClaimComment | null {
+  const match = body.match(/claim-nonce:([^\s]+)\s+executor:([^\s>]+)/);
+  if (!match) return null;
+  return { nonce: match[1], executorId: match[2] };
+}
+
+function latestClaimComment(comments: Array<{ body: string }>): ClaimComment | null {
+  for (let i = comments.length - 1; i >= 0; i -= 1) {
+    const parsed = parseClaimComment(comments[i].body);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function claimedByLabels(labels: string[]): string[] {
+  return labels.filter((label) => label.startsWith(CLAIMED_BY_PREFIX));
+}
+
+function executorIdFromClaimedByLabel(label: string): string | undefined {
+  if (!label.startsWith(CLAIMED_BY_PREFIX)) return undefined;
+  const executorId = label.slice(CLAIMED_BY_PREFIX.length);
+  return executorId.length > 0 ? executorId : undefined;
+}
+
+function logClaimEvent(taskId: number, message: string, context: Record<string, unknown>): void {
+  appendToLog(
+    'gh.log',
+    `[${new Date().toISOString()}] claim task ${taskId} ${message} ${JSON.stringify(context)}\n---`,
+  );
+}
+
+async function readClaimSnapshot(config: Config, taskId: number): Promise<IssueClaimSnapshot> {
+  const { stdout } = await gh([
+    'issue', 'view', String(taskId),
+    '--repo', config.repoSlug,
+    '--json', 'labels,comments',
+  ]);
+  const raw = JSON.parse(stdout) as {
+    labels?: Array<{ name?: string }>;
+    comments?: Array<{ body?: string }>;
+  };
+
+  return {
+    labels: (raw.labels ?? [])
+      .map((label) => label.name ?? '')
+      .filter((label) => label.length > 0),
+    comments: (raw.comments ?? []).map((comment) => ({ body: comment.body ?? '' })),
+  };
+}
+
+async function readIssueLabels(config: Config, taskId: number): Promise<string[]> {
+  const { stdout } = await gh([
+    'issue', 'view', String(taskId),
+    '--repo', config.repoSlug,
+    '--json', 'labels',
+    '-q', '.labels',
+  ]);
+  return (JSON.parse(stdout) as Array<{ name: string }>).map((label) => label.name);
+}
+
+async function finalizeWinningClaim(
+  config: Config,
+  taskId: number,
+  claimedBy: string,
+  labels: string[],
+): Promise<void> {
+  const competingClaims = claimedByLabels(labels).filter((label) => label !== claimedBy);
+  await editIssueLabels(
+    config,
+    taskId,
+    [LABELS.statusInProgress, claimedBy],
+    [LABELS.statusTodo, ...competingClaims],
+  );
+}
+
+async function cleanupLosingClaim(
+  config: Config,
+  taskId: number,
+  claimedBy: string,
+): Promise<void> {
+  await editIssueLabels(config, taskId, [], [claimedBy]);
+  const labelsAfterCleanup = await readIssueLabels(config, taskId);
+  const remainingClaims = claimedByLabels(labelsAfterCleanup);
+  if (remainingClaims.length > 0) {
+    return;
+  }
+
+  await editIssueLabels(config, taskId, [LABELS.statusTodo], [LABELS.statusInProgress]);
+}
+
 export async function listIssues(
   config: Config,
   labels: string[],
@@ -76,6 +176,7 @@ export async function listIssues(
     'issue', 'list',
     '--repo', config.repoSlug,
     '--state', state,
+    '--limit', '500',
     '--json', 'number,title,body,labels,state,updatedAt',
   ];
   for (const label of labels) {
@@ -209,7 +310,7 @@ export async function claimTask(config: Config, taskId: number): Promise<ClaimAt
   const nonce = randomUUID();
   const claimedBy = claimedByLabel(config.executorId);
 
-  // Step 1: Swap labels
+  // Step 1: Try to enter the claim set.
   await editIssueLabels(
     config,
     taskId,
@@ -217,65 +318,107 @@ export async function claimTask(config: Config, taskId: number): Promise<ClaimAt
     [LABELS.statusTodo],
   );
 
-  // Step 2: Post nonce comment
+  // Step 2: Publish claim nonce for deterministic winner election.
   await gh([
     'issue', 'comment', String(taskId),
     '--repo', config.repoSlug,
     '--body', `<!-- claim-nonce:${nonce} executor:${config.executorId} -->`,
   ]);
 
-  // Step 3: Wait for propagation
+  // Step 3: Wait briefly for issue view consistency.
   await new Promise((resolve) => setTimeout(resolve, 1000));
 
-  // Step 4: Re-read labels
-  const { stdout: labelsJson } = await gh([
-    'issue', 'view', String(taskId),
-    '--repo', config.repoSlug,
-    '--json', 'labels',
-    '-q', '.labels',
-  ]);
-  const labels = (JSON.parse(labelsJson) as Array<{ name: string }>).map((l) => l.name);
-
-  // Check if another executor's claimed-by label exists
-  const claimedByLabels = labels.filter((l) => l.startsWith(CLAIMED_BY_PREFIX));
-  const ourClaimPresent = claimedByLabels.includes(claimedBy);
-  const otherClaimPresent = claimedByLabels.some((l) => l !== claimedBy);
-
-  if (otherClaimPresent || !ourClaimPresent) {
-    // Lost the race — unclaim
-    await editIssueLabels(
-      config,
+  // Step 4: Determine winner from latest claim nonce.
+  const initialSnapshot = await readClaimSnapshot(config, taskId);
+  const latestClaim = latestClaimComment(initialSnapshot.comments);
+  if (!latestClaim || latestClaim.executorId !== config.executorId) {
+    await cleanupLosingClaim(config, taskId, claimedBy);
+    logClaimEvent(taskId, 'lost-race', {
+      executorId: config.executorId,
+      nonce,
+      latestClaimExecutorId: latestClaim?.executorId ?? null,
+      latestClaimNonce: latestClaim?.nonce ?? null,
+    });
+    return {
       taskId,
-      [LABELS.statusTodo],
-      [LABELS.statusInProgress, claimedBy],
-    );
-    return { taskId, nonce, success: false };
+      nonce,
+      success: false,
+      reason: 'lost-race',
+      ownerExecutorId: latestClaim?.executorId,
+    };
   }
 
-  // Step 5: Verify nonce is the latest
-  const { stdout: commentsJson } = await gh([
-    'issue', 'view', String(taskId),
-    '--repo', config.repoSlug,
-    '--json', 'comments',
-    '-q', '.comments',
-  ]);
-  const comments = JSON.parse(commentsJson) as Array<{ body: string }>;
-  const claimComments = comments.filter((c) => c.body.includes('claim-nonce:'));
+  // Step 5: Winner finalizes labels.
+  await finalizeWinningClaim(config, taskId, claimedBy, initialSnapshot.labels);
 
-  if (claimComments.length > 0) {
-    const lastClaim = claimComments[claimComments.length - 1];
-    if (!lastClaim.body.includes(`executor:${config.executorId}`)) {
-      // Another executor posted a newer nonce
-      await editIssueLabels(
-        config,
-        taskId,
-        [LABELS.statusTodo],
-        [LABELS.statusInProgress, claimedBy],
-      );
-      return { taskId, nonce, success: false };
-    }
+  // Step 6: Verify winner still owns latest claim and labels are coherent.
+  const verifySnapshot = await readClaimSnapshot(config, taskId);
+  const latestAfterFinalize = latestClaimComment(verifySnapshot.comments);
+  if (
+    !latestAfterFinalize
+    || latestAfterFinalize.executorId !== config.executorId
+  ) {
+    await cleanupLosingClaim(config, taskId, claimedBy);
+    logClaimEvent(taskId, 'lost-race-after-finalize', {
+      executorId: config.executorId,
+      nonce,
+      latestClaimExecutorId: latestAfterFinalize?.executorId ?? null,
+      latestClaimNonce: latestAfterFinalize?.nonce ?? null,
+    });
+    return {
+      taskId,
+      nonce,
+      success: false,
+      reason: 'lost-race',
+      ownerExecutorId: latestAfterFinalize?.executorId,
+    };
   }
 
+  const verifyClaimLabels = claimedByLabels(verifySnapshot.labels);
+  const ourClaimPresent = verifyClaimLabels.includes(claimedBy);
+  if (!ourClaimPresent) {
+    const ownerExecutorId = executorIdFromClaimedByLabel(verifyClaimLabels[0] ?? '');
+    logClaimEvent(taskId, 'missing-claim-label', {
+      executorId: config.executorId,
+      nonce,
+      labels: verifySnapshot.labels,
+      ownerExecutorId: ownerExecutorId ?? null,
+    });
+    return {
+      taskId,
+      nonce,
+      success: false,
+      reason: 'missing-claim-label',
+      ownerExecutorId,
+    };
+  }
+
+  const inProgressPresent = verifySnapshot.labels.includes(LABELS.statusInProgress);
+  if (!inProgressPresent) {
+    logClaimEvent(taskId, 'missing-in-progress-label', {
+      executorId: config.executorId,
+      nonce,
+      labels: verifySnapshot.labels,
+    });
+    return {
+      taskId,
+      nonce,
+      success: false,
+      reason: 'missing-in-progress-label',
+    };
+  }
+
+  const competingClaims = verifyClaimLabels.filter((label) => label !== claimedBy);
+  if (competingClaims.length > 0) {
+    await editIssueLabels(config, taskId, [], competingClaims);
+    logClaimEvent(taskId, 'removed-competing-claims', {
+      executorId: config.executorId,
+      nonce,
+      competingClaims,
+    });
+  }
+
+  logClaimEvent(taskId, 'claim-success', { executorId: config.executorId, nonce });
   return { taskId, nonce, success: true };
 }
 
@@ -341,7 +484,7 @@ function deriveChecksStatusFromCheckRuns(
   return hasPending ? 'pending' : 'passing';
 }
 
-async function getPRChecksStatus(config: Config, prNumber: number): Promise<'passing' | 'failing' | 'pending'> {
+async function getPRChecksStatus(config: Config, prNumber: number): Promise<'passing' | 'failing' | 'pending' | 'unknown'> {
   try {
     const { stdout } = await gh([
       'pr', 'checks', String(prNumber),
@@ -359,9 +502,9 @@ async function getPRChecksStatus(config: Config, prNumber: number): Promise<'pas
       return 'pending';
     }
 
-    // Conservative fallback: if checks cannot be read, do not merge yet.
+    // Permission error — cannot determine check status; let caller decide.
     if (/resource not accessible by personal access token/i.test(message)) {
-      return 'pending';
+      return 'unknown';
     }
 
     throw error;

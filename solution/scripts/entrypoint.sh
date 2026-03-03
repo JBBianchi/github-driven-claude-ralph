@@ -122,6 +122,10 @@ fi
 git config --global user.name  "${GIT_AUTHOR_NAME:?GIT_AUTHOR_NAME required}"
 git config --global user.email "${GIT_AUTHOR_EMAIL:?GIT_AUTHOR_EMAIL required}"
 
+# Mark workspace directories as safe (handles ownership mismatches from volume mounts)
+git config --global --add safe.directory /workspace/repo
+git config --global --add safe.directory '*'
+
 # Git HTTPS auth via token
 git config --global url."https://${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 

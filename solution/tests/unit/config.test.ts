@@ -1,5 +1,41 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { loadConfig } from '../../src/config.js';
+
+vi.mock('node:fs', () => ({
+  mkdirSync: vi.fn(),
+  openSync: vi.fn(),
+  closeSync: vi.fn(),
+  unlinkSync: vi.fn(),
+  statSync: vi.fn(),
+  readdirSync: vi.fn(),
+  readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+}));
+
+const mockMkdirSync = vi.mocked(mkdirSync);
+const mockOpenSync = vi.mocked(openSync);
+const mockCloseSync = vi.mocked(closeSync);
+const mockUnlinkSync = vi.mocked(unlinkSync);
+const mockStatSync = vi.mocked(statSync);
+const mockReaddirSync = vi.mocked(readdirSync);
+const mockReadFileSync = vi.mocked(readFileSync);
+const mockWriteFileSync = vi.mocked(writeFileSync);
+
+function errno(code: string): NodeJS.ErrnoException {
+  const error = new Error(code) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
 
 describe('loadConfig', () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -13,6 +49,7 @@ describe('loadConfig', () => {
   };
 
   beforeEach(() => {
+    vi.resetAllMocks();
     originalEnv = { ...process.env };
     // Start with clean env for each test
     for (const key of Object.keys(process.env)) {
@@ -20,6 +57,15 @@ describe('loadConfig', () => {
     }
     // Set PATH so node can still run
     process.env.PATH = originalEnv.PATH;
+
+    mockOpenSync.mockReturnValue(42);
+    mockReadFileSync.mockImplementation(() => {
+      throw errno('ENOENT');
+    });
+    mockReaddirSync.mockReturnValue([]);
+    mockStatSync.mockImplementation(() => {
+      throw errno('ENOENT');
+    });
   });
 
   afterEach(() => {
@@ -50,11 +96,45 @@ describe('loadConfig', () => {
 
   it('applies executor defaults for pollIntervalSeconds, maxTurnsPerRun, executorId', () => {
     Object.assign(process.env, requiredEnv);
+    process.env.HOSTNAME = 'executor-instance-a';
     const config = loadConfig('executor');
 
     expect(config.pollIntervalSeconds).toBe(60);
     expect(config.maxTurnsPerRun).toBe(100);
     expect(config.executorId).toBe('executor-01');
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      '/workspace/state/executor/.instance-ids/executor-instance-a.id',
+      'executor-01',
+      'utf-8',
+    );
+  });
+
+  it('reuses previously assigned executorId for the same instance key', () => {
+    Object.assign(process.env, requiredEnv);
+    process.env.HOSTNAME = 'executor-instance-a';
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path.endsWith('executor-instance-a.id')) {
+        return 'executor-02';
+      }
+      throw errno('ENOENT');
+    });
+
+    const config = loadConfig('executor');
+
+    expect(config.executorId).toBe('executor-02');
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mockCloseSync).toHaveBeenCalledWith(42);
+    expect(mockUnlinkSync).toHaveBeenCalledWith('/workspace/state/executor/.id-allocation.lock');
+  });
+
+  it('uses explicit EXECUTOR_ID without attempting auto-allocation', () => {
+    Object.assign(process.env, requiredEnv, { EXECUTOR_ID: 'executor-07' });
+
+    const config = loadConfig('executor');
+
+    expect(config.executorId).toBe('executor-07');
+    expect(mockOpenSync).not.toHaveBeenCalled();
+    expect(mockMkdirSync).not.toHaveBeenCalled();
   });
 
   it('uses GITHUB_TOKEN when GH_TOKEN is not set', () => {
@@ -126,5 +206,79 @@ describe('loadConfig', () => {
     Object.assign(process.env, requiredEnv, { GIT_COMMIT_SIGNING: 'invalid' });
 
     expect(() => loadConfig('planner')).toThrow(/off|gpg|ssh/i);
+  });
+
+  it('defaults autonomousMode to false when PLANNER_AUTONOMOUS_MODE is not set', () => {
+    Object.assign(process.env, requiredEnv);
+    const config = loadConfig('planner');
+    expect(config.autonomousMode).toBe(false);
+  });
+
+  it('enables autonomousMode when PLANNER_AUTONOMOUS_MODE is "true"', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_AUTONOMOUS_MODE: 'true' });
+    const config = loadConfig('planner');
+    expect(config.autonomousMode).toBe(true);
+  });
+
+  it('keeps autonomousMode disabled for non-"true" values', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_AUTONOMOUS_MODE: 'yes' });
+    const config = loadConfig('planner');
+    expect(config.autonomousMode).toBe(false);
+  });
+
+  it('defaults autonomousMaxFeatures to 3', () => {
+    Object.assign(process.env, requiredEnv);
+    const config = loadConfig('planner');
+    expect(config.autonomousMaxFeatures).toBe(3);
+  });
+
+  it('respects PLANNER_AUTONOMOUS_MAX_FEATURES override', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_AUTONOMOUS_MAX_FEATURES: '5' });
+    const config = loadConfig('planner');
+    expect(config.autonomousMaxFeatures).toBe(5);
+  });
+
+  it('throws on invalid PLANNER_AUTONOMOUS_MAX_FEATURES', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_AUTONOMOUS_MAX_FEATURES: 'abc' });
+    expect(() => loadConfig('planner')).toThrow(/PLANNER_AUTONOMOUS_MAX_FEATURES/);
+  });
+
+  it('throws when PLANNER_AUTONOMOUS_MAX_FEATURES is zero', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_AUTONOMOUS_MAX_FEATURES: '0' });
+    expect(() => loadConfig('planner')).toThrow(/PLANNER_AUTONOMOUS_MAX_FEATURES/);
+  });
+
+  it('defaults autonomousFocus to empty string', () => {
+    Object.assign(process.env, requiredEnv);
+    const config = loadConfig('planner');
+    expect(config.autonomousFocus).toBe('');
+  });
+
+  it('respects PLANNER_AUTONOMOUS_FOCUS override', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_AUTONOMOUS_FOCUS: 'security' });
+    const config = loadConfig('planner');
+    expect(config.autonomousFocus).toBe('security');
+  });
+
+  it('defaults maxConcurrentPlans to 0', () => {
+    Object.assign(process.env, requiredEnv);
+    const config = loadConfig('planner');
+    expect(config.maxConcurrentPlans).toBe(0);
+  });
+
+  it('respects PLANNER_MAX_CONCURRENT_PLANS override', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_MAX_CONCURRENT_PLANS: '2' });
+    const config = loadConfig('planner');
+    expect(config.maxConcurrentPlans).toBe(2);
+  });
+
+  it('throws on invalid PLANNER_MAX_CONCURRENT_PLANS', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_MAX_CONCURRENT_PLANS: 'abc' });
+    expect(() => loadConfig('planner')).toThrow(/PLANNER_MAX_CONCURRENT_PLANS/);
+  });
+
+  it('throws when PLANNER_MAX_CONCURRENT_PLANS is negative', () => {
+    Object.assign(process.env, requiredEnv, { PLANNER_MAX_CONCURRENT_PLANS: '-1' });
+    expect(() => loadConfig('planner')).toThrow(/PLANNER_MAX_CONCURRENT_PLANS/);
   });
 });

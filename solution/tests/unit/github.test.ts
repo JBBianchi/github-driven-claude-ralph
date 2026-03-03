@@ -38,6 +38,10 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: '',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    autonomousMode: false,
+    autonomousMaxFeatures: 3,
+    autonomousFocus: '',
+    maxConcurrentPlans: 0,
     ...overrides,
   };
 }
@@ -55,6 +59,7 @@ describe('listIssues', () => {
       expect.arrayContaining([
         'issue', 'list',
         '--repo', 'org/repo',
+        '--limit', '500',
         '--label', 'task',
         '--label', 'status:todo',
         '--json', 'number,title,body,labels,state,updatedAt',
@@ -240,47 +245,100 @@ describe('ensureLabels', () => {
 describe('claimTask', () => {
   beforeEach(() => mockExeca.mockReset());
 
-  it('generates nonce, swaps labels, posts comment, verifies ownership', async () => {
+  it('wins when latest nonce is ours and removes competing claimed-by labels', async () => {
     const config = makeConfig();
-    // Call 1: add labels (in-progress + claimed-by:executor-01), remove todo
+
+    // Initial claim entry (add, remove) + nonce comment
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
-    // Call 2: post comment with nonce
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
-    // Call 3: re-read issue labels
+
+    // Initial snapshot: latest claim is ours, but another claimed-by label exists
     mockExeca.mockResolvedValueOnce({
-      stdout: JSON.stringify([
-        { name: 'task' },
-        { name: 'status:in-progress' },
-        { name: 'claimed-by:executor-01' },
-      ]),
+      stdout: JSON.stringify({
+        labels: [
+          { name: 'task' },
+          { name: 'status:in-progress' },
+          { name: 'claimed-by:executor-01' },
+          { name: 'claimed-by:executor-02' },
+        ],
+        comments: [
+          { body: '<!-- claim-nonce:older executor:executor-02 -->' },
+          { body: '<!-- claim-nonce:newer executor:executor-01 -->' },
+        ],
+      }),
       stderr: '',
       exitCode: 0,
     } as any);
-    // Call 4: re-read comments to verify nonce
+
+    // Winner finalization (add, remove)
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+    // Verification snapshot still shows competing label due propagation lag
     mockExeca.mockResolvedValueOnce({
-      stdout: JSON.stringify([
-        { body: '<!-- claim-nonce:test-nonce executor:executor-01 -->' },
-      ]),
+      stdout: JSON.stringify({
+        labels: [
+          { name: 'task' },
+          { name: 'status:in-progress' },
+          { name: 'claimed-by:executor-01' },
+          { name: 'claimed-by:executor-02' },
+        ],
+        comments: [
+          { body: '<!-- claim-nonce:older executor:executor-02 -->' },
+          { body: '<!-- claim-nonce:newer executor:executor-01 -->' },
+        ],
+      }),
       stderr: '',
       exitCode: 0,
     } as any);
+
+    // Explicit competing claim cleanup
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
 
     const result = await claimTask(config, 42);
 
     expect(result.taskId).toBe(42);
     expect(result.success).toBe(true);
     expect(result.nonce).toBeTruthy();
+    expect(result.reason).toBeUndefined();
+
+    const removeCompetingCall = mockExeca.mock.calls.find((call) => {
+      const args = call[1] as string[];
+      return args.includes('--remove-label') && args.includes('claimed-by:executor-02');
+    });
+    expect(removeCompetingCall).toBeTruthy();
   });
 
-  it('returns success:false when another executor claimed first', async () => {
+  it('returns success:false when latest nonce belongs to another executor and keeps in-progress claimed by winner', async () => {
     const config = makeConfig();
-    // Label swap
+
+    // Initial claim entry (add, remove) + nonce comment
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
-    // Post comment
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
-    // Re-read labels — another executor's label is present
+
+    // Initial snapshot: latest claim belongs to executor-02
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        labels: [
+          { name: 'task' },
+          { name: 'status:in-progress' },
+          { name: 'claimed-by:executor-01' },
+          { name: 'claimed-by:executor-02' },
+        ],
+        comments: [
+          { body: '<!-- claim-nonce:older executor:executor-01 -->' },
+          { body: '<!-- claim-nonce:newer executor:executor-02 -->' },
+        ],
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    // Loser cleanup removes only our claimed-by label
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    // Remaining labels still include winner claim, so no todo restore
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify([
         { name: 'task' },
@@ -290,46 +348,75 @@ describe('claimTask', () => {
       stderr: '',
       exitCode: 0,
     } as any);
-    // Unclaim: restore labels (add todo, remove in-progress, remove claimed-by)
-    mockExeca.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 } as any);
 
     const result = await claimTask(config, 42);
 
     expect(result.success).toBe(false);
+    expect(result.reason).toBe('lost-race');
+    expect(result.ownerExecutorId).toBe('executor-02');
+
+    const removedInProgress = mockExeca.mock.calls.some((call) => {
+      const args = call[1] as string[];
+      return args.includes('--remove-label') && args.includes('status:in-progress');
+    });
+    expect(removedInProgress).toBe(false);
   });
 
-  it('returns success:false when a newer nonce comment is found', async () => {
+  it('restores todo and removes in-progress when loser cleanup finds no remaining claim labels', async () => {
     const config = makeConfig();
-    // Label swap
+
+    // Initial claim entry (add, remove) + nonce comment
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
-    // Post comment
     mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
-    // Re-read labels — our label is present
+
+    // Initial snapshot: race lost to executor-02
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        labels: [
+          { name: 'task' },
+          { name: 'status:in-progress' },
+          { name: 'claimed-by:executor-01' },
+        ],
+        comments: [
+          { body: '<!-- claim-nonce:our-nonce executor:executor-01 -->' },
+          { body: '<!-- claim-nonce:newer-nonce executor:executor-02 -->' },
+        ],
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+
+    // Loser cleanup: remove our claim label
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+    // No remaining claim labels => restore todo / clear in-progress
     mockExeca.mockResolvedValueOnce({
       stdout: JSON.stringify([
         { name: 'task' },
         { name: 'status:in-progress' },
-        { name: 'claimed-by:executor-01' },
       ]),
       stderr: '',
       exitCode: 0,
     } as any);
-    // Re-read comments — newer nonce from different executor
-    mockExeca.mockResolvedValueOnce({
-      stdout: JSON.stringify([
-        { body: '<!-- claim-nonce:our-nonce executor:executor-01 -->' },
-        { body: '<!-- claim-nonce:newer-nonce executor:executor-02 -->' },
-      ]),
-      stderr: '',
-      exitCode: 0,
-    } as any);
-    // Unclaim calls
-    mockExeca.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 } as any);
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any); // add todo
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any); // remove in-progress
 
     const result = await claimTask(config, 42);
 
     expect(result.success).toBe(false);
+    expect(result.reason).toBe('lost-race');
+    expect(result.ownerExecutorId).toBe('executor-02');
+
+    const addTodoCall = mockExeca.mock.calls.find((call) => {
+      const args = call[1] as string[];
+      return args.includes('--add-label') && args.includes('status:todo');
+    });
+    const removeInProgressCall = mockExeca.mock.calls.find((call) => {
+      const args = call[1] as string[];
+      return args.includes('--remove-label') && args.includes('status:in-progress');
+    });
+    expect(addTodoCall).toBeTruthy();
+    expect(removeInProgressCall).toBeTruthy();
   });
 });
 
@@ -572,6 +659,24 @@ describe('getPRStatus', () => {
 
     const status = await getPRStatus(makeConfig(), 56);
     expect(status).toBe('conflicting');
+  });
+
+  it('returns mergeable when merge state is CLEAN but token lacks checks permission', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: '',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+    mockExeca.mockRejectedValueOnce(
+      new Error('GraphQL: Resource not accessible by personal access token'),
+    );
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('mergeable');
   });
 });
 
