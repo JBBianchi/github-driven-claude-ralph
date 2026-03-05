@@ -107,7 +107,7 @@ describe('runPlannerIteration', () => {
   it('invokes Claude for plan creation when features need plans', async () => {
     const feature = makeIssue({ number: 1, title: 'Add login' });
     setListIssuesMap({
-      'open|feature,needs-plan': [feature],
+      'open|needs-plan': [feature],
     });
 
     await runPlannerIteration(makeConfig(), makeLogger());
@@ -120,7 +120,7 @@ describe('runPlannerIteration', () => {
   it('passes configured claudeModel to planner invocations', async () => {
     const feature = makeIssue({ number: 1, title: 'Add login' });
     setListIssuesMap({
-      'open|feature,needs-plan': [feature],
+      'open|needs-plan': [feature],
     });
 
     await runPlannerIteration(makeConfig({ claudeModel: 'claude-planner' }), makeLogger());
@@ -135,7 +135,7 @@ describe('runPlannerIteration', () => {
   it('passes planner sub-agents when enabled', async () => {
     const feature = makeIssue({ number: 1, title: 'Add login' });
     setListIssuesMap({
-      'open|feature,needs-plan': [feature],
+      'open|needs-plan': [feature],
     });
 
     await runPlannerIteration(makeConfig({ claudeSubagentsEnabled: true }), makeLogger());
@@ -154,7 +154,7 @@ describe('runPlannerIteration', () => {
   it('rethrows fatal Claude authentication failures', async () => {
     const feature = makeIssue({ number: 1, title: 'Add login' });
     setListIssuesMap({
-      'open|feature,needs-plan': [feature],
+      'open|needs-plan': [feature],
     });
     mockInvokeClaude.mockRejectedValue(new Error('Claude authentication failed: OAuth token has expired.'));
 
@@ -703,7 +703,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
 
   it('skips Phase 0 when pipeline has features needing plans', async () => {
     setListIssuesMap({
-      'open|feature,needs-plan': [makeIssue({ number: 1 })],
+      'open|needs-plan': [makeIssue({ number: 1 })],
     });
 
     await runPlannerIteration(makeConfig({ autonomousMode: true }), makeLogger());

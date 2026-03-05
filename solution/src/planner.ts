@@ -98,7 +98,7 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
   // Phase 0: Autonomous analysis (opt-in, self-regulating)
   if (config.autonomousMode) {
     try {
-      const pendingFeatures = await listIssues(config, [LABELS.feature, LABELS.needsPlan]);
+      const pendingFeatures = await listIssues(config, [LABELS.needsPlan]);
       const readyPlans = await listIssues(config, [LABELS.planReady]);
       const openTasks = await listIssues(config, [LABELS.task]);
 
@@ -151,7 +151,7 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
 
   // Phase 1: Plan creation
   try {
-    const features = await listIssues(config, [LABELS.feature, LABELS.needsPlan]);
+    const features = await listIssues(config, [LABELS.needsPlan]);
     if (features.length > 0) {
       logger.info('Found features needing plans', { count: features.length });
       const prompt = buildPlannerPrompt(config, features);
