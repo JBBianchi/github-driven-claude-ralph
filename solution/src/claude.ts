@@ -185,6 +185,14 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
     '--verbose',
   ];
 
+  if (invocation.model) {
+    args.push('--model', invocation.model);
+  }
+
+  if (invocation.agents && Object.keys(invocation.agents).length > 0) {
+    args.push('--agents', JSON.stringify(invocation.agents));
+  }
+
   if (invocation.systemPromptFile) {
     args.push('--append-system-prompt-file', invocation.systemPromptFile);
   }
@@ -229,6 +237,8 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
       outputFormat: invocation.outputFormat,
       workingDirectory: invocation.workingDirectory,
       hasResumeSessionId: Boolean(invocation.resumeSessionId),
+      hasCustomAgents: Boolean(invocation.agents && Object.keys(invocation.agents).length > 0),
+      customAgentCount: invocation.agents ? Object.keys(invocation.agents).length : 0,
       claudePid,
     });
     appendToLog(
@@ -240,13 +250,17 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
       const elapsedMs = Date.now() - start;
       const processSnapshot = claudePid ? buildLinuxProcessSnapshot(claudePid) : null;
 
-      // Stall detection: kill subprocess if nothing has changed for too long.
+      const toolActive = processSnapshot !== null;
+
+      // Stall detection: only applies while tool subprocess activity is visible.
       const hasProgress =
         stdoutBytes !== lastStdoutBytes
         || stderrBytes !== lastStderrBytes
         || processSnapshot !== lastProcessSnapshot;
 
-      if (hasProgress) {
+      if (!toolActive) {
+        staleHeartbeats = 0;
+      } else if (hasProgress) {
         staleHeartbeats = 0;
       } else {
         staleHeartbeats += 1;
@@ -262,6 +276,7 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
         claudePid,
         stdoutBytes,
         stderrBytes,
+        toolActive,
         staleHeartbeats,
         processSnapshot,
       });
@@ -270,7 +285,7 @@ export async function invokeClaude(invocation: ClaudeInvocation): Promise<Claude
         `[${new Date().toISOString()}] HEARTBEAT activity=${activity} pid=${claudePid ?? 'unknown'} elapsedMs=${elapsedMs} timeoutMs=${TIMEOUT_MS} stdoutBytes=${stdoutBytes} stderrBytes=${stderrBytes} stale=${staleHeartbeats}/${STALL_HEARTBEAT_LIMIT}${processSnapshot ? ` processSnapshot=${processSnapshot}` : ''}`,
       );
 
-      if (staleHeartbeats >= STALL_HEARTBEAT_LIMIT) {
+      if (toolActive && staleHeartbeats >= STALL_HEARTBEAT_LIMIT) {
         invocation.logger?.warn('Claude invocation stalled — killing subprocess', {
           activity,
           elapsedMs,

@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { execa } from 'execa';
-import { syncRepo, ensureWorktree, pushBranch, makeBranchName, mergeBase, abortMerge } from '../../src/git.js';
+import {
+  syncRepo,
+  ensureWorktree,
+  pushBranch,
+  deleteRemoteBranch,
+  makeBranchName,
+  mergeBase,
+  abortMerge,
+} from '../../src/git.js';
 import type { Config } from '../../src/types.js';
 
 vi.mock('execa', () => ({
@@ -25,6 +33,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: '',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    claudeSubagentsEnabled: false,
     autonomousMode: false,
     autonomousMaxFeatures: 3,
     autonomousFocus: '',
@@ -233,6 +242,30 @@ describe('pushBranch', () => {
     mockExeca.mockRejectedValueOnce(new Error('push rejected'));
 
     await expect(pushBranch('/workspace/worktrees/42')).rejects.toThrow('push rejected');
+  });
+});
+
+describe('deleteRemoteBranch', () => {
+  beforeEach(() => {
+    mockExeca.mockReset();
+  });
+
+  it('deletes remote branch from repo path', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+    await deleteRemoteBranch('task/42-add-login');
+
+    expect(mockExeca).toHaveBeenCalledWith(
+      'git',
+      ['push', 'origin', '--delete', 'task/42-add-login'],
+      expect.objectContaining({ cwd: '/workspace/repo' }),
+    );
+  });
+
+  it('propagates error on delete failure', async () => {
+    mockExeca.mockRejectedValueOnce(new Error('remote ref does not exist'));
+
+    await expect(deleteRemoteBranch('task/42-add-login')).rejects.toThrow('remote ref does not exist');
   });
 });
 

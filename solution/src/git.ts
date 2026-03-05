@@ -89,6 +89,15 @@ export async function pushBranch(worktreePath: string): Promise<void> {
 }
 
 /**
+ * Deletes a remote branch from origin.
+ * @param branch - Remote branch name to delete.
+ * @returns Resolves when the branch deletion command completes.
+ */
+export async function deleteRemoteBranch(branch: string): Promise<void> {
+  await execa('git', ['push', 'origin', '--delete', branch], { cwd: REPO_PATH });
+}
+
+/**
  * Merges the base branch into the current worktree branch.
  * Fetches origin first, then attempts `git merge origin/<baseBranch> --no-edit`.
  * @param config - Application configuration (uses baseBranch).

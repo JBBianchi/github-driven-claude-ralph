@@ -73,9 +73,13 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `BASE_BRANCH` | `main` | Branch to sync against |
 | `PLANNER_POLL_INTERVAL_SECONDS` | `120` | Seconds between planner iterations |
 | `PLANNER_MAX_TURNS` | `50` | Max Claude tool-use turns per planner invocation |
+| `PLANNER_MODEL` | _(empty)_ | Planner Claude model override (`--model`) |
+| `CLAUDE_SUBAGENTS_ENABLED` | `false` | Enable custom Claude sub-agent definitions via `--agents` |
 | `EXECUTOR_ID` | `executor-01` | Unique ID for this executor instance |
 | `EXECUTOR_POLL_INTERVAL_SECONDS` | `60` | Seconds between executor iterations |
 | `EXECUTOR_MAX_TURNS` | `100` | Max Claude tool-use turns per executor invocation |
+| `EXECUTOR_MODEL` | _(empty)_ | Executor Claude model override (`--model`) |
+| `CLAUDE_MODEL` | _(empty)_ | Shared fallback Claude model for both roles |
 | `VALIDATION_COMMAND` | _(empty)_ | Command for Claude to run before committing (e.g. `npm test`) |
 | `GIT_COMMIT_SIGNING` | `off` | Commit signing mode: `off`, `gpg`, or `ssh` |
 | `GIT_SIGNING_KEY` | _(empty)_ | GPG key ID (required when `gpg` mode) |
@@ -92,6 +96,10 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `RLM_PLUGIN_VERIFY_REQUIRED` | `true` | If `true`, fail startup when `rlm_core` import or hook health check fails |
 | `RLM_ACTIVATION_MODE` | `complexity` | Initial activation mode written to RLM config on first bootstrap |
 | `RLM_DEBUG` | `0` | Enable verbose RLM debug output (`1` to enable) |
+
+Model precedence is role-specific first, then shared fallback:
+- Planner: `PLANNER_MODEL` -> `CLAUDE_MODEL` -> Claude CLI default
+- Executor: `EXECUTOR_MODEL` -> `CLAUDE_MODEL` -> Claude CLI default
 
 ## RLM plugin integration
 

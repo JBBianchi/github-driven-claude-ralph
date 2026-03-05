@@ -7,6 +7,7 @@ import {
   addComment,
 } from './github.js';
 import { invokeClaude } from './claude.js';
+import { getClaudeSubagents } from './subagents.js';
 import { LABELS } from './labels.js';
 import type { Config, Logger, GitHubIssue } from './types.js';
 
@@ -85,6 +86,8 @@ Repository: ${config.repoSlug}`;
 }
 
 export async function runPlannerIteration(config: Config, logger: Logger): Promise<void> {
+  const claudeSubagents = getClaudeSubagents(config.role, config.claudeSubagentsEnabled);
+
   try {
     await syncRepo(config);
   } catch (error) {
@@ -124,6 +127,8 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
           maxTurns: config.maxTurnsPerRun,
           outputFormat: 'text',
           workingDirectory: '/workspace/repo',
+          model: config.claudeModel,
+          agents: claudeSubagents,
         });
 
         logger.info('Autonomous analysis finished', {
@@ -157,6 +162,8 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
         maxTurns: config.maxTurnsPerRun,
         outputFormat: 'text',
         workingDirectory: '/workspace/repo',
+        model: config.claudeModel,
+        agents: claudeSubagents,
       });
       logger.info('Claude plan creation finished', {
         success: result.success,
@@ -188,6 +195,8 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
         maxTurns: config.maxTurnsPerRun,
         outputFormat: 'text',
         workingDirectory: '/workspace/repo',
+        model: config.claudeModel,
+        agents: claudeSubagents,
       });
     }
   } catch (error) {

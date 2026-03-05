@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { syncRepo, ensureWorktree, pushBranch, makeBranchName, mergeBase, abortMerge } from '../../src/git.js';
+import {
+  syncRepo,
+  ensureWorktree,
+  pushBranch,
+  deleteRemoteBranch,
+  makeBranchName,
+  mergeBase,
+  abortMerge,
+} from '../../src/git.js';
 import {
   listIssues,
   claimTask,
@@ -34,6 +42,7 @@ vi.mock('../../src/git.js', () => ({
   syncRepo: vi.fn(),
   ensureWorktree: vi.fn(),
   pushBranch: vi.fn(),
+  deleteRemoteBranch: vi.fn(),
   makeBranchName: vi.fn(),
   mergeBase: vi.fn(),
   abortMerge: vi.fn(),
@@ -67,6 +76,7 @@ vi.mock('../../src/state.js', () => ({
 const mockSyncRepo = vi.mocked(syncRepo);
 const mockEnsureWorktree = vi.mocked(ensureWorktree);
 const mockPushBranch = vi.mocked(pushBranch);
+const mockDeleteRemoteBranch = vi.mocked(deleteRemoteBranch);
 const mockMakeBranchName = vi.mocked(makeBranchName);
 const mockMergeBase = vi.mocked(mergeBase);
 const mockAbortMerge = vi.mocked(abortMerge);
@@ -103,6 +113,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: 'npm test',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    claudeSubagentsEnabled: false,
     autonomousMode: false,
     autonomousMaxFeatures: 3,
     autonomousFocus: '',
@@ -145,6 +156,7 @@ describe('runExecutorIteration', () => {
     mockMakeBranchName.mockReturnValue('task/42-add-button');
     mockEnsureWorktree.mockResolvedValue('/workspace/worktrees/42');
     mockPushBranch.mockResolvedValue(undefined);
+    mockDeleteRemoteBranch.mockResolvedValue(undefined);
     mockPostWorkMapping.mockResolvedValue(undefined);
     mockEditIssueLabels.mockResolvedValue(undefined);
     mockCloseIssue.mockResolvedValue(undefined);
@@ -355,6 +367,40 @@ describe('runExecutorIteration', () => {
     expect(call.prompt).toContain('Add button');
   });
 
+  it('passes configured claudeModel during implementation', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(null);
+
+    await runExecutorIteration(makeConfig({ claudeModel: 'claude-executor' }), makeLogger());
+
+    expect(mockInvokeClaude).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'claude-executor',
+      }),
+    );
+  });
+
+  it('passes executor sub-agents during implementation when enabled', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(null);
+
+    await runExecutorIteration(makeConfig({ claudeSubagentsEnabled: true }), makeLogger());
+
+    expect(mockInvokeClaude).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: expect.objectContaining({
+          'executor-implementer': expect.any(Object),
+          'executor-ci-debugger': expect.any(Object),
+          'executor-conflict-resolver': expect.any(Object),
+        }),
+      }),
+    );
+  });
+
   it('returns early when Claude implementation invocation fails', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
@@ -467,6 +513,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(config, makeLogger());
 
     expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockDeleteRemoteBranch).toHaveBeenCalledWith('task/42-add-button');
     expect(mockEditIssueLabels).toHaveBeenCalledWith(
       expect.anything(), 42,
       ['status:done'],
@@ -474,6 +521,27 @@ describe('runExecutorIteration', () => {
     );
     expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 42);
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
+  });
+
+  it('continues task cleanup when remote branch deletion fails after merge', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(makePR());
+    mockGetPRStatus.mockResolvedValue('mergeable');
+    mockDeleteRemoteBranch.mockRejectedValueOnce(new Error('remote ref does not exist'));
+
+    const logger = makeLogger();
+    await runExecutorIteration(makeConfig(), logger);
+
+    expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockDeleteRemoteBranch).toHaveBeenCalledWith('task/42-add-button');
+    expect(mockCloseIssue).toHaveBeenCalledWith(expect.anything(), 42);
+    expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to delete remote branch'),
+      expect.objectContaining({ branch: 'task/42-add-button' }),
+    );
   });
 
   it('does nothing on pending status', async () => {
@@ -487,6 +555,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), logger);
 
     expect(mockMergePR).not.toHaveBeenCalled();
+    expect(mockDeleteRemoteBranch).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('pending'),
       expect.anything(),
@@ -509,6 +578,7 @@ describe('runExecutorIteration', () => {
     expect(mockMergeBase).toHaveBeenCalledWith(expect.anything(), '/workspace/worktrees/42');
     expect(mockPushBranch).toHaveBeenCalledWith('/workspace/worktrees/42');
     expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockDeleteRemoteBranch).toHaveBeenCalledWith('task/42-add-button');
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
   });
 
@@ -535,7 +605,30 @@ describe('runExecutorIteration', () => {
     expect(conflictCall.prompt).toContain('#56');
     expect(mockPushBranch).toHaveBeenCalledWith('/workspace/worktrees/42');
     expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockDeleteRemoteBranch).toHaveBeenCalledWith('task/42-add-button');
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
+  });
+
+  it('passes configured claudeModel during conflict resolution', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude
+      .mockResolvedValueOnce({ success: true, durationMs: 100 })
+      .mockResolvedValueOnce({ success: true, durationMs: 200 });
+    mockFindPRByBranch.mockResolvedValue(makePR());
+    mockGetPRStatus
+      .mockResolvedValueOnce('conflicting')
+      .mockResolvedValueOnce('mergeable');
+    mockMergeBase.mockResolvedValue(false);
+
+    await runExecutorIteration(makeConfig({ claudeModel: 'claude-executor' }), makeLogger());
+
+    const conflictCall = mockInvokeClaude.mock.calls[1][0];
+    expect(conflictCall).toEqual(
+      expect.objectContaining({
+        model: 'claude-executor',
+      }),
+    );
   });
 
   it('aborts merge and breaks when Claude fails to resolve conflicts', async () => {
@@ -555,6 +648,7 @@ describe('runExecutorIteration', () => {
     expect(mockAbortMerge).toHaveBeenCalledWith('/workspace/worktrees/42');
     expect(mockPushBranch).not.toHaveBeenCalled();
     expect(mockMergePR).not.toHaveBeenCalled();
+    expect(mockDeleteRemoteBranch).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('conflict resolution failed'),
       expect.anything(),
@@ -579,6 +673,7 @@ describe('runExecutorIteration', () => {
     // implementation + review = 2 Claude calls
     expect(mockInvokeClaude).toHaveBeenCalledTimes(2);
     expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
+    expect(mockDeleteRemoteBranch).toHaveBeenCalledWith('task/42-add-button');
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
   });
 
@@ -599,6 +694,25 @@ describe('runExecutorIteration', () => {
     expect(mockGetPRCheckDetails).toHaveBeenCalled();
     // Claude called twice: once for implementation, once for review
     expect(mockInvokeClaude).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes configured claudeModel during review attempts', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(makePR());
+    mockGetPRStatus.mockResolvedValueOnce('failing');
+    mockGetPRCheckDetails.mockResolvedValue('build: FAILURE');
+    mockGetPRStatus.mockResolvedValueOnce('mergeable');
+
+    await runExecutorIteration(makeConfig({ claudeModel: 'claude-executor' }), makeLogger());
+
+    const reviewCall = mockInvokeClaude.mock.calls[1][0];
+    expect(reviewCall).toEqual(
+      expect.objectContaining({
+        model: 'claude-executor',
+      }),
+    );
   });
 
   it('pushes branch after each review attempt', async () => {
@@ -627,6 +741,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), makeLogger());
 
     expect(mockMergePR).toHaveBeenCalled();
+    expect(mockDeleteRemoteBranch).toHaveBeenCalledWith('task/42-add-button');
   });
 
   it('retries review up to 3 times', async () => {

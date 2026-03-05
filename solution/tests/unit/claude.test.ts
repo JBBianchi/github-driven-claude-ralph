@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { execa } from 'execa';
+import { readFileSync, readdirSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { invokeClaude } from '../../src/claude.js';
 import type { ClaudeInvocation, Logger } from '../../src/types.js';
@@ -8,7 +9,20 @@ vi.mock('execa', () => ({
   execa: vi.fn(),
 }));
 
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return {
+    ...actual,
+    readFileSync: vi.fn(),
+    readdirSync: vi.fn(),
+  };
+});
+
 const mockExeca = vi.mocked(execa);
+const mockReadFileSync = vi.mocked(readFileSync);
+const mockReaddirSync = vi.mocked(readdirSync);
+
+const TOOL_CHILD_PID = 12000;
 
 function makeInvocation(overrides: Partial<ClaudeInvocation> = {}): ClaudeInvocation {
   return {
@@ -28,9 +42,32 @@ function makeLogger(): Logger {
   };
 }
 
+function configureToolProcessSnapshot(rootPid: number, commandProvider: () => string): void {
+  mockReaddirSync.mockImplementation(() => [String(TOOL_CHILD_PID)]);
+  mockReadFileSync.mockImplementation((path: string | Buffer | URL) => {
+    const normalizedPath = String(path);
+    if (normalizedPath === `/proc/${TOOL_CHILD_PID}/stat`) {
+      return `${TOOL_CHILD_PID} (tool) S ${rootPid} 0 0 0`;
+    }
+
+    if (normalizedPath === `/proc/${TOOL_CHILD_PID}/cmdline`) {
+      return Buffer.from(`${commandProvider()}\0--flag`);
+    }
+
+    throw new Error(`Unexpected path read during process snapshot test: ${normalizedPath}`);
+  });
+}
+
 describe('invokeClaude', () => {
   beforeEach(() => {
     mockExeca.mockReset();
+    mockReadFileSync.mockReset();
+    mockReaddirSync.mockReset();
+    // Default test mode: no visible descendant tool processes.
+    mockReaddirSync.mockImplementation(() => []);
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error('Unexpected readFileSync call in test');
+    });
     vi.useRealTimers();
   });
 
@@ -70,6 +107,47 @@ describe('invokeClaude', () => {
     const args = mockExeca.mock.calls[0][1] as string[];
     expect(args).toContain('--resume');
     expect(args).toContain('sess-abc-123');
+  });
+
+  it('appends --model when model is set', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '{}', stderr: '', exitCode: 0 } as any);
+
+    await invokeClaude(makeInvocation({ model: 'claude-opus-4' }));
+
+    const args = mockExeca.mock.calls[0][1] as string[];
+    expect(args).toContain('--model');
+    expect(args).toContain('claude-opus-4');
+  });
+
+  it('omits --model when model is not set', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '{}', stderr: '', exitCode: 0 } as any);
+
+    await invokeClaude(makeInvocation());
+
+    const args = mockExeca.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--model');
+  });
+
+  it('appends --agents when custom agents are provided', async () => {
+    mockExeca.mockResolvedValueOnce({ stdout: '{}', stderr: '', exitCode: 0 } as any);
+
+    await invokeClaude(makeInvocation({
+      agents: {
+        'executor-implementer': {
+          description: 'Implements task-scoped code changes.',
+          prompt: 'Implement the requested task with minimal unrelated edits.',
+        },
+      },
+    }));
+
+    const args = mockExeca.mock.calls[0][1] as string[];
+    expect(args).toContain('--agents');
+    expect(args).toContain(JSON.stringify({
+      'executor-implementer': {
+        description: 'Implements task-scoped code changes.',
+        prompt: 'Implement the requested task with minimal unrelated edits.',
+      },
+    }));
   });
 
   it('extracts text result from JSON response when outputFormat is text', async () => {
@@ -232,10 +310,43 @@ describe('invokeClaude', () => {
     );
   });
 
-  it('kills subprocess after consecutive stale heartbeats', async () => {
+  it('does not kill subprocess when no tool activity is detected', async () => {
     vi.useFakeTimers();
     const logger = makeLogger();
     const killFn = vi.fn();
+
+    let resolveProcess: ((value: { stdout: string; stderr: string; exitCode: number }) => void) | null = null;
+    const completion = new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
+      resolveProcess = resolve;
+    });
+
+    const subprocess = Object.assign(completion, {
+      pid: 9999,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: killFn,
+    });
+    mockExeca.mockReturnValueOnce(subprocess as any);
+
+    const pending = invokeClaude(makeInvocation({ logger, activity: 'inference-only' }));
+
+    // With no tool subprocess snapshot, stale tracking stays disabled.
+    await vi.advanceTimersByTimeAsync(11 * 30_000);
+
+    expect(killFn).not.toHaveBeenCalled();
+
+    resolveProcess?.({ stdout: '{}', stderr: '', exitCode: 0 });
+    subprocess.stdout.end();
+    subprocess.stderr.end();
+    await pending;
+  });
+
+  it('kills subprocess after consecutive stale heartbeats during tool activity', async () => {
+    vi.useFakeTimers();
+    const logger = makeLogger();
+    const killFn = vi.fn();
+
+    configureToolProcessSnapshot(9999, () => 'bash dotnet-test');
 
     let rejectProcess: ((reason: Error) => void) | null = null;
     const completion = new Promise<{ stdout: string; stderr: string; exitCode: number }>((_resolve, reject) => {
@@ -252,10 +363,16 @@ describe('invokeClaude', () => {
 
     const pending = invokeClaude(makeInvocation({ logger, activity: 'stuck-task' }));
 
-    // Advance through 10 stale heartbeats (10 × 30s = 300s)
-    // The first heartbeat at 30s is never stale (first observation), so we need 11 intervals.
+    // First heartbeat establishes baseline; next 10 unchanged heartbeats trigger stall kill.
     await vi.advanceTimersByTimeAsync(11 * 30_000);
 
+    expect(logger.info).toHaveBeenCalledWith(
+      'Claude invocation heartbeat',
+      expect.objectContaining({
+        activity: 'stuck-task',
+        toolActive: true,
+      }),
+    );
     expect(killFn).toHaveBeenCalledWith('SIGTERM');
     expect(logger.warn).toHaveBeenCalledWith(
       'Claude invocation stalled — killing subprocess',
@@ -265,7 +382,7 @@ describe('invokeClaude', () => {
       }),
     );
 
-    // Clean up: reject the promise so invokeClaude finishes
+    // Clean up: reject the promise so invokeClaude finishes.
     const error = new Error('killed') as any;
     error.stderr = '';
     rejectProcess?.(error);
@@ -274,11 +391,14 @@ describe('invokeClaude', () => {
     await pending;
   });
 
-  it('resets stale counter when process snapshot changes', async () => {
+  it('resets stale counter when process snapshot changes during tool activity', async () => {
     vi.useFakeTimers();
     const logger = makeLogger();
     const killFn = vi.fn();
     const stdoutStream = new PassThrough();
+
+    let commandToken = 'snapshot-a';
+    configureToolProcessSnapshot(8888, () => commandToken);
 
     let resolveProcess: ((value: { stdout: string; stderr: string; exitCode: number }) => void) | null = null;
     const completion = new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
@@ -295,20 +415,19 @@ describe('invokeClaude', () => {
 
     const pending = invokeClaude(makeInvocation({ logger, activity: 'progressing-task' }));
 
-    // Advance 8 stale heartbeats (just under the limit of 10)
+    // Advance 8 stale heartbeats (just under the kill threshold).
     await vi.advanceTimersByTimeAsync(9 * 30_000);
     expect(killFn).not.toHaveBeenCalled();
 
-    // Write some output to reset the stale counter
-    stdoutStream.write('progress');
+    // Change snapshot content to represent tool progress and reset stale count.
+    commandToken = 'snapshot-b';
     await vi.advanceTimersByTimeAsync(30_000);
     expect(killFn).not.toHaveBeenCalled();
 
-    // Advance another 8 stale heartbeats — still under limit since counter reset
+    // Advance another 8 stale heartbeats; still below limit after reset.
     await vi.advanceTimersByTimeAsync(8 * 30_000);
     expect(killFn).not.toHaveBeenCalled();
 
-    // Clean up
     resolveProcess?.({ stdout: '{}', stderr: '', exitCode: 0 });
     stdoutStream.end();
     subprocess.stderr.end();
@@ -350,6 +469,7 @@ describe('invokeClaude', () => {
         claudePid: 4321,
         stdoutBytes: 5,
         stderrBytes: 4,
+        toolActive: false,
       }),
     );
   });

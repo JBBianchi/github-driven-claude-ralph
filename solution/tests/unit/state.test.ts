@@ -42,6 +42,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: '',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    claudeSubagentsEnabled: false,
     autonomousMode: false,
     autonomousMaxFeatures: 3,
     autonomousFocus: '',

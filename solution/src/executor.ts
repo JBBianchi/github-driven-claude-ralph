@@ -1,4 +1,12 @@
-import { syncRepo, ensureWorktree, pushBranch, makeBranchName, mergeBase, abortMerge } from './git.js';
+import {
+  syncRepo,
+  ensureWorktree,
+  pushBranch,
+  deleteRemoteBranch,
+  makeBranchName,
+  mergeBase,
+  abortMerge,
+} from './git.js';
 import {
   listIssues,
   claimTask,
@@ -13,6 +21,7 @@ import {
   requestCopilotReview,
 } from './github.js';
 import { invokeClaude } from './claude.js';
+import { getClaudeSubagents } from './subagents.js';
 import {
   readExecutorState,
   writeExecutorState,
@@ -20,7 +29,15 @@ import {
   recoverStateFromGitHub,
 } from './state.js';
 import { CLAIMED_BY_PREFIX, LABELS, claimedByLabel } from './labels.js';
-import type { Config, Logger, GitHubIssue, GitHubPR, ExecutorState, PRStatus } from './types.js';
+import type {
+  Config,
+  Logger,
+  GitHubIssue,
+  GitHubPR,
+  ExecutorState,
+  PRStatus,
+  ClaudeSubagentMap,
+} from './types.js';
 
 const PROMPTS_DIR = '/opt/agent/prompts';
 const MAX_REVIEW_ATTEMPTS = 3;
@@ -142,6 +159,7 @@ async function runReviewLoop(
   task: GitHubIssue,
   pr: GitHubPR,
   worktreePath: string,
+  agents?: ClaudeSubagentMap,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < MAX_REVIEW_ATTEMPTS; attempt++) {
     logger.info('Review attempt', { attempt: attempt + 1, maxAttempts: MAX_REVIEW_ATTEMPTS });
@@ -156,6 +174,8 @@ async function runReviewLoop(
       maxTurns: config.maxTurnsPerRun,
       outputFormat: 'text',
       workingDirectory: worktreePath,
+      model: config.claudeModel,
+      agents,
       logger,
       activity: 'executor-review',
     });
@@ -205,8 +225,20 @@ async function runReviewLoop(
   return false;
 }
 
+async function deleteMergedPRRemoteBranch(logger: Logger, branch: string): Promise<void> {
+  try {
+    await deleteRemoteBranch(branch);
+  } catch (error: unknown) {
+    logger.warn('Failed to delete remote branch after PR merge', {
+      branch,
+      error: String(error),
+    });
+  }
+}
+
 export async function runExecutorIteration(config: Config, logger: Logger): Promise<void> {
   const iterationStartedAt = Date.now();
+  const claudeSubagents = getClaudeSubagents(config.role, config.claudeSubagentsEnabled);
   let outcome = 'completed';
   logger.info('Executor iteration started', { executorId: config.executorId });
 
@@ -296,6 +328,8 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       maxTurns: config.maxTurnsPerRun,
       outputFormat: 'json',
       workingDirectory: worktreePath,
+      model: config.claudeModel,
+      agents: claudeSubagents,
       resumeSessionId: state.sessionId ?? undefined,
       logger,
       activity: 'executor-implementation',
@@ -342,6 +376,7 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     switch (prStatus) {
       case 'mergeable':
         await mergePR(config, pr.number);
+        await deleteMergedPRRemoteBranch(logger, branch);
         await editIssueLabels(
           config,
           state.activeTaskId!,
@@ -356,9 +391,10 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
 
       case 'failing': {
         // --- Phase 5: Review loop ---
-        const fixed = await runReviewLoop(config, logger, task, pr, worktreePath);
+        const fixed = await runReviewLoop(config, logger, task, pr, worktreePath, claudeSubagents);
         if (fixed) {
           await mergePR(config, pr.number);
+          await deleteMergedPRRemoteBranch(logger, branch);
           await editIssueLabels(
             config,
             state.activeTaskId!,
@@ -390,6 +426,8 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
             maxTurns: config.maxTurnsPerRun,
             outputFormat: 'text',
             workingDirectory: worktreePath,
+            model: config.claudeModel,
+            agents: claudeSubagents,
             logger,
             activity: 'executor-conflict-resolution',
           });
@@ -410,6 +448,7 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
         const postConflictStatus = await pollForCIResult(config, pr.number, 10 * 60 * 1000, 30_000, logger);
         if (postConflictStatus === 'mergeable') {
           await mergePR(config, pr.number);
+          await deleteMergedPRRemoteBranch(logger, branch);
           await editIssueLabels(
             config,
             state.activeTaskId!,
@@ -424,9 +463,10 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
             prNumber: pr.number,
           });
         } else if (postConflictStatus === 'failing') {
-          const fixed = await runReviewLoop(config, logger, task, pr, worktreePath);
+          const fixed = await runReviewLoop(config, logger, task, pr, worktreePath, claudeSubagents);
           if (fixed) {
             await mergePR(config, pr.number);
+            await deleteMergedPRRemoteBranch(logger, branch);
             await editIssueLabels(
               config,
               state.activeTaskId!,

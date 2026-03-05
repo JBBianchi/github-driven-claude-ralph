@@ -84,6 +84,7 @@ describe('loadConfig', () => {
     expect(config.baseBranch).toBe('main');
     expect(config.gitCommitSigning).toBe('off');
     expect(config.role).toBe('planner');
+    expect(config.claudeSubagentsEnabled).toBe(false);
   });
 
   it('applies planner defaults for pollIntervalSeconds and maxTurnsPerRun', () => {
@@ -202,10 +203,71 @@ describe('loadConfig', () => {
     expect(config.signingKeysMount).toBe('/custom/keys');
   });
 
+  it('uses PLANNER_MODEL over CLAUDE_MODEL for planner role', () => {
+    Object.assign(process.env, requiredEnv, {
+      CLAUDE_MODEL: 'claude-global',
+      PLANNER_MODEL: 'claude-planner',
+    });
+
+    const config = loadConfig('planner');
+
+    expect(config.claudeModel).toBe('claude-planner');
+  });
+
+  it('falls back to CLAUDE_MODEL when PLANNER_MODEL is missing', () => {
+    Object.assign(process.env, requiredEnv, {
+      CLAUDE_MODEL: 'claude-global',
+    });
+
+    const config = loadConfig('planner');
+
+    expect(config.claudeModel).toBe('claude-global');
+  });
+
+  it('uses EXECUTOR_MODEL over CLAUDE_MODEL for executor role', () => {
+    Object.assign(process.env, requiredEnv, {
+      CLAUDE_MODEL: 'claude-global',
+      EXECUTOR_MODEL: 'claude-executor',
+    });
+
+    const config = loadConfig('executor');
+
+    expect(config.claudeModel).toBe('claude-executor');
+  });
+
+  it('falls back to CLAUDE_MODEL when EXECUTOR_MODEL is missing', () => {
+    Object.assign(process.env, requiredEnv, {
+      CLAUDE_MODEL: 'claude-global',
+    });
+
+    const config = loadConfig('executor');
+
+    expect(config.claudeModel).toBe('claude-global');
+  });
+
+  it('treats blank model values as unset', () => {
+    Object.assign(process.env, requiredEnv, {
+      CLAUDE_MODEL: '   ',
+      PLANNER_MODEL: '\t',
+    });
+
+    const config = loadConfig('planner');
+
+    expect(config.claudeModel).toBeUndefined();
+  });
+
   it('throws on invalid GIT_COMMIT_SIGNING value', () => {
     Object.assign(process.env, requiredEnv, { GIT_COMMIT_SIGNING: 'invalid' });
 
     expect(() => loadConfig('planner')).toThrow(/off|gpg|ssh/i);
+  });
+
+  it('enables claudeSubagentsEnabled when CLAUDE_SUBAGENTS_ENABLED is "true"', () => {
+    Object.assign(process.env, requiredEnv, { CLAUDE_SUBAGENTS_ENABLED: 'true' });
+
+    const config = loadConfig('planner');
+
+    expect(config.claudeSubagentsEnabled).toBe(true);
   });
 
   it('defaults autonomousMode to false when PLANNER_AUTONOMOUS_MODE is not set', () => {

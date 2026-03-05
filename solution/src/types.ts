@@ -16,6 +16,10 @@ export interface Config {
   validationCommand: string;
   gitAuthorName: string;
   gitAuthorEmail: string;
+  /** Optional Claude model override resolved from environment variables. */
+  claudeModel?: string;
+  /** Enables passing custom Claude sub-agent definitions to the CLI. */
+  claudeSubagentsEnabled: boolean;
   /** Whether autonomous mode is enabled for the planner. */
   autonomousMode: boolean;
   /** Maximum features to create per autonomous analysis. */
@@ -57,12 +61,29 @@ export interface AgentMeta {
   pr?: number;
 }
 
+/**
+ * Definition for a Claude sub-agent passed through `claude --agents`.
+ */
+export interface ClaudeSubagentDefinition {
+  description: string;
+  prompt: string;
+}
+
+/**
+ * Named Claude sub-agent map passed through `claude --agents`.
+ */
+export type ClaudeSubagentMap = Record<string, ClaudeSubagentDefinition>;
+
 export interface ClaudeInvocation {
   prompt: string;
   systemPromptFile?: string;
   maxTurns: number;
   outputFormat: 'text' | 'json';
   workingDirectory: string;
+  /** Optional Claude model passed as `--model` when provided. */
+  model?: string;
+  /** Optional custom sub-agent definitions passed as `--agents` JSON. */
+  agents?: ClaudeSubagentMap;
   resumeSessionId?: string;
   logger?: Logger;
   activity?: string;

@@ -50,6 +50,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: '',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    claudeSubagentsEnabled: false,
     autonomousMode: false,
     autonomousMaxFeatures: 3,
     autonomousFocus: '',
@@ -113,6 +114,40 @@ describe('runPlannerIteration', () => {
 
     expect(mockInvokeClaude).toHaveBeenCalledWith(
       expect.objectContaining({ systemPromptFile: expect.stringContaining('plan.md') }),
+    );
+  });
+
+  it('passes configured claudeModel to planner invocations', async () => {
+    const feature = makeIssue({ number: 1, title: 'Add login' });
+    setListIssuesMap({
+      'open|feature,needs-plan': [feature],
+    });
+
+    await runPlannerIteration(makeConfig({ claudeModel: 'claude-planner' }), makeLogger());
+
+    expect(mockInvokeClaude).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'claude-planner',
+      }),
+    );
+  });
+
+  it('passes planner sub-agents when enabled', async () => {
+    const feature = makeIssue({ number: 1, title: 'Add login' });
+    setListIssuesMap({
+      'open|feature,needs-plan': [feature],
+    });
+
+    await runPlannerIteration(makeConfig({ claudeSubagentsEnabled: true }), makeLogger());
+
+    expect(mockInvokeClaude).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: expect.objectContaining({
+          'planner-codebase-analyst': expect.any(Object),
+          'planner-plan-author': expect.any(Object),
+          'planner-task-decomposer': expect.any(Object),
+        }),
+      }),
     );
   });
 

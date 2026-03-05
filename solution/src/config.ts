@@ -29,6 +29,16 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function optionalTrimmedEnv(name: string): string | undefined {
+  const value = process.env[name];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function toErrnoError(error: unknown): NodeJS.ErrnoException | null {
   if (typeof error !== 'object' || error === null || !('code' in error)) {
     return null;
@@ -203,6 +213,14 @@ function resolveExecutorId(role: Role): string {
   return allocateExecutorId();
 }
 
+function resolveClaudeModel(role: Role): string | undefined {
+  const roleModel = role === 'planner'
+    ? optionalTrimmedEnv('PLANNER_MODEL')
+    : optionalTrimmedEnv('EXECUTOR_MODEL');
+
+  return roleModel ?? optionalTrimmedEnv('CLAUDE_MODEL');
+}
+
 export function loadConfig(role: Role): Config {
   const repoUrl = requireEnv('REPO_URL');
   const repoSlug = requireEnv('REPO_SLUG');
@@ -264,6 +282,8 @@ export function loadConfig(role: Role): Config {
     validationCommand: process.env.VALIDATION_COMMAND || '',
     gitAuthorName,
     gitAuthorEmail,
+    claudeModel: resolveClaudeModel(role),
+    claudeSubagentsEnabled: process.env.CLAUDE_SUBAGENTS_ENABLED === 'true',
     autonomousMode: process.env.PLANNER_AUTONOMOUS_MODE === 'true',
     autonomousMaxFeatures,
     autonomousFocus: process.env.PLANNER_AUTONOMOUS_FOCUS ?? '',
