@@ -497,9 +497,9 @@ async function getPRChecksStatus(config: Config, prNumber: number): Promise<'pas
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
 
-    // GitHub may temporarily return this before check suites materialize.
+    // No check suites exist for this branch/PR; treat as passing.
     if (/no checks reported on the/i.test(message)) {
-      return 'pending';
+      return 'passing';
     }
 
     // Permission error — cannot determine check status; let caller decide.

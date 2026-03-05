@@ -197,7 +197,7 @@ describe('invokeClaude', () => {
     error.stdout = '';
     mockExeca.mockRejectedValueOnce(error);
 
-    await expect(invokeClaude(makeInvocation())).rejects.toThrow('Claude authentication failed');
+    await expect(invokeClaude(makeInvocation())).rejects.toThrow('Agent authentication failed');
   });
 
   it('sets 30-minute timeout', async () => {
@@ -256,7 +256,7 @@ describe('invokeClaude', () => {
       exitCode: 0,
     } as any);
 
-    await expect(invokeClaude(makeInvocation())).rejects.toThrow('Claude authentication failed');
+    await expect(invokeClaude(makeInvocation())).rejects.toThrow('Agent authentication failed');
   });
 
   it('measures duration in milliseconds', async () => {
@@ -474,3 +474,4 @@ describe('invokeClaude', () => {
     );
   });
 });
+

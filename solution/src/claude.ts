@@ -1,5 +1,6 @@
 import { execa } from 'execa';
 import { readFileSync, readdirSync } from 'node:fs';
+import { throwIfClaudeAuthFailure } from './agent-auth.js';
 import { appendToLog } from './log-files.js';
 import type { ClaudeInvocation, ClaudeResult } from './types.js';
 
@@ -7,7 +8,6 @@ const TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const HEARTBEAT_MS = 30 * 1000;
 /** Kill the subprocess after this many consecutive heartbeats with no progress. */
 const STALL_HEARTBEAT_LIMIT = 10; // 10 × 30s = 5 minutes
-const CLAUDE_AUTH_FAILURE_PREFIX = 'Claude authentication failed:';
 const MAX_PROCESS_SNAPSHOT_ENTRIES = 6;
 const PROCESS_CMDLINE_PREVIEW_CHARS = 140;
 
@@ -147,30 +147,6 @@ function buildLinuxProcessSnapshot(rootPid: number): string | null {
       .join(' | ');
   } catch {
     return null;
-  }
-}
-
-function isClaudeAuthFailure(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes('failed to authenticate')
-    || normalized.includes('authentication_error')
-    || normalized.includes('oauth token has expired')
-    || normalized.includes('please obtain a new token')
-    || normalized.includes('401')
-  );
-}
-
-function getAuthFailureMessage(message: string): string {
-  if (message.includes('OAuth token has expired')) {
-    return `${CLAUDE_AUTH_FAILURE_PREFIX} OAuth token has expired.`;
-  }
-  return `${CLAUDE_AUTH_FAILURE_PREFIX} API credentials are invalid or expired.`;
-}
-
-function throwIfClaudeAuthFailure(rawMessage: string): void {
-  if (isClaudeAuthFailure(rawMessage)) {
-    throw new Error(getAuthFailureMessage(rawMessage));
   }
 }
 

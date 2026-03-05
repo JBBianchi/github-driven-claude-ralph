@@ -1,6 +1,7 @@
 FROM node:24-slim AS base
 
 ARG CLAUDE_CODE_VERSION=latest
+ARG CODEX_CLI_VERSION=latest
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git gpg gpg-agent jq curl ca-certificates openssh-client \
@@ -20,6 +21,7 @@ RUN mkdir -p /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+RUN npm install -g @openai/codex@${CODEX_CLI_VERSION}
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable \
     && ln -sf /root/.cargo/bin/cargo /usr/local/bin/cargo \
     && ln -sf /root/.cargo/bin/rustc /usr/local/bin/rustc
@@ -36,6 +38,7 @@ RUN mkdir -p /workspace/repo /workspace/worktrees /workspace/state /workspace/lo
 # Claude Code CLI requires these paths to exist
 RUN mkdir -p /etc/claude-code && echo '{}' > /etc/claude-code/managed-settings.json
 RUN mkdir -p /home/agent/.claude/debug && chown -R agent:agent /home/agent/.claude
+RUN mkdir -p /home/agent/.codex && chown -R agent:agent /home/agent/.codex
 
 # --- Build stage: compile TypeScript ---
 FROM base AS build

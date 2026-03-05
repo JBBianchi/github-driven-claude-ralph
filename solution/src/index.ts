@@ -31,7 +31,12 @@ async function main(): Promise<void> {
 
   const logger = createLogger(role, role === 'executor' ? config.executorId : undefined);
 
-  logger.info('Agent starting', { role, repoSlug: config.repoSlug });
+  logger.info('Agent starting', {
+    role,
+    repoSlug: config.repoSlug,
+    provider: config.agentProvider,
+    model: config.agentModel ?? '(provider default)',
+  });
 
   const { shouldContinue } = setupShutdownHandler();
 

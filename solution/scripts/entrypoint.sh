@@ -8,6 +8,31 @@ mkdir -p "${LOG_DIR}" >/dev/null 2>&1 || true
 ENTRYPOINT_LOG="${LOG_DIR}/entrypoint-${ROLE}.log"
 exec > >(tee -a "${ENTRYPOINT_LOG}") 2>&1
 
+ROLE_PROVIDER=""
+case "${ROLE}" in
+  planner)
+    ROLE_PROVIDER="${PLANNER_PROVIDER:-}"
+    ;;
+  executor)
+    ROLE_PROVIDER="${EXECUTOR_PROVIDER:-}"
+    ;;
+  *)
+    echo "FATAL: Unsupported role: ${ROLE}"
+    exit 1
+    ;;
+esac
+
+AGENT_PROVIDER_SELECTED="${ROLE_PROVIDER:-${AGENT_PROVIDER:-claude}}"
+case "${AGENT_PROVIDER_SELECTED}" in
+  claude|codex)
+    ;;
+  *)
+    echo "FATAL: Invalid AGENT_PROVIDER/role override: ${AGENT_PROVIDER_SELECTED} (expected claude|codex)"
+    exit 1
+    ;;
+esac
+echo "Selected agent provider: ${AGENT_PROVIDER_SELECTED}"
+
 is_truthy() {
   case "${1,,}" in
     1|true|yes|on) return 0 ;;
@@ -193,37 +218,38 @@ echo "GitHub CLI version: $(gh --version | head -n 1)"
 # gh uses the GH_TOKEN env var automatically; just verify it works
 gh auth status
 
-# =========================================================
-# 5. Validate Claude credentials
-# =========================================================
-CLAUDE_CREDS="/home/agent/.claude/.credentials.json"
-if [ ! -f "$CLAUDE_CREDS" ]; then
-  echo "FATAL: Claude credentials file not found at ${CLAUDE_CREDS}"
-  echo "Mount your credentials file via: -v /path/to/.credentials.json:${CLAUDE_CREDS}:ro"
-  exit 1
-fi
-echo "Claude credentials file found ($(wc -c < "$CLAUDE_CREDS") bytes)"
+if [ "${AGENT_PROVIDER_SELECTED}" = "claude" ]; then
+  # =========================================================
+  # 5. Validate Claude credentials
+  # =========================================================
+  CLAUDE_CREDS="/home/agent/.claude/.credentials.json"
+  if [ ! -f "$CLAUDE_CREDS" ]; then
+    echo "FATAL: Claude credentials file not found at ${CLAUDE_CREDS}"
+    echo "Mount your credentials file via: -v /path/to/.credentials.json:${CLAUDE_CREDS}:ro"
+    exit 1
+  fi
+  echo "Claude credentials file found ($(wc -c < "$CLAUDE_CREDS") bytes)"
 
-# =========================================================
-# 6. Optional RLM plugin setup (Claude Code plugin)
-# =========================================================
-RLM_PLUGIN_ENABLED="${RLM_PLUGIN_ENABLED:-true}"
-RLM_PLUGIN_REQUIRED="${RLM_PLUGIN_REQUIRED:-true}"
-RLM_PLUGIN_REF="${RLM_PLUGIN_REF:-rlm-claude-code@rlm-claude-code}"
-RLM_PLUGIN_KEY="${RLM_PLUGIN_KEY:-rlm-claude-code@rlm-claude-code}"
-RLM_PLUGIN_NAME="${RLM_PLUGIN_NAME:-${RLM_PLUGIN_REF%%@*}}"
-RLM_PLUGIN_SCOPE="${RLM_PLUGIN_SCOPE:-user}"
-RLM_MARKETPLACE_SOURCE="${RLM_MARKETPLACE_SOURCE:-rand/rlm-claude-code}"
-RLM_ACTIVATION_MODE="${RLM_ACTIVATION_MODE:-complexity}"
-RLM_CONFIG_PATH="${RLM_CONFIG_PATH:-/home/agent/.claude/rlm-config.json}"
-RLM_DEBUG="${RLM_DEBUG:-0}"
-RLM_PLUGIN_BUILD_HOOKS="${RLM_PLUGIN_BUILD_HOOKS:-true}"
-RLM_PLUGIN_SYNC_REQUIRED="${RLM_PLUGIN_SYNC_REQUIRED:-true}"
-RLM_PLUGIN_VERIFY_REQUIRED="${RLM_PLUGIN_VERIFY_REQUIRED:-true}"
-export RLM_DEBUG
-export RLM_CONFIG_PATH
+  # =========================================================
+  # 6. Optional RLM plugin setup (Claude Code plugin)
+  # =========================================================
+  RLM_PLUGIN_ENABLED="${RLM_PLUGIN_ENABLED:-true}"
+  RLM_PLUGIN_REQUIRED="${RLM_PLUGIN_REQUIRED:-true}"
+  RLM_PLUGIN_REF="${RLM_PLUGIN_REF:-rlm-claude-code@rlm-claude-code}"
+  RLM_PLUGIN_KEY="${RLM_PLUGIN_KEY:-rlm-claude-code@rlm-claude-code}"
+  RLM_PLUGIN_NAME="${RLM_PLUGIN_NAME:-${RLM_PLUGIN_REF%%@*}}"
+  RLM_PLUGIN_SCOPE="${RLM_PLUGIN_SCOPE:-user}"
+  RLM_MARKETPLACE_SOURCE="${RLM_MARKETPLACE_SOURCE:-rand/rlm-claude-code}"
+  RLM_ACTIVATION_MODE="${RLM_ACTIVATION_MODE:-complexity}"
+  RLM_CONFIG_PATH="${RLM_CONFIG_PATH:-/home/agent/.claude/rlm-config.json}"
+  RLM_DEBUG="${RLM_DEBUG:-0}"
+  RLM_PLUGIN_BUILD_HOOKS="${RLM_PLUGIN_BUILD_HOOKS:-true}"
+  RLM_PLUGIN_SYNC_REQUIRED="${RLM_PLUGIN_SYNC_REQUIRED:-true}"
+  RLM_PLUGIN_VERIFY_REQUIRED="${RLM_PLUGIN_VERIFY_REQUIRED:-true}"
+  export RLM_DEBUG
+  export RLM_CONFIG_PATH
 
-if is_truthy "${RLM_PLUGIN_ENABLED}"; then
+  if is_truthy "${RLM_PLUGIN_ENABLED}"; then
   RLM_BOOTSTRAP_STARTED_AT="$(date +%s)"
   echo "RLM plugin bootstrap enabled (${RLM_PLUGIN_REF})"
 
@@ -380,36 +406,70 @@ if is_truthy "${RLM_PLUGIN_ENABLED}"; then
       echo "RLM plugin bootstrap completed in $((RLM_BOOTSTRAP_ENDED_AT - RLM_BOOTSTRAP_STARTED_AT))s"
     fi
   fi
-else
+  else
   echo "RLM plugin bootstrap disabled (RLM_PLUGIN_ENABLED=${RLM_PLUGIN_ENABLED})"
-fi
-
-# =========================================================
-# 7. Claude CLI health check
-# =========================================================
-echo "Claude CLI version: $(claude --version 2>&1 || echo 'UNKNOWN')"
-echo "Claude CLI health check..."
-HEALTH_OUT=$(claude -p "respond with just the word ok" --dangerously-skip-permissions --output-format text --max-turns 1 2>&1) || true
-echo "Claude health check result: ${HEALTH_OUT:0:200}"
-if [ "$HEALTH_OUT" = "Execution error" ]; then
-  echo "ERROR: Claude CLI returning 'Execution error'. Dumping diagnostics..."
-  echo "  HOME=$HOME"
-  echo "  Claude config dir: $(ls -la /home/agent/.claude/ 2>&1)"
-  echo "  Credentials file type: $(file "$CLAUDE_CREDS" 2>&1)"
-  echo "  Node version: $(node --version)"
-  echo "  Claude binary: $(which claude) -> $(readlink -f "$(which claude)" 2>/dev/null || echo 'not a symlink')"
-fi
-
-if is_truthy "${RLM_PLUGIN_ENABLED}" && [ -n "${RLM_PLUGIN_DIR:-}" ] && [ -x "${RLM_PLUGIN_DIR}/scripts/hook-dispatch.sh" ]; then
-  echo "RLM hook check..."
-  RLM_HOOK_INPUT='{"session_id":"rlm-bootstrap-healthcheck","source":"startup","cwd":"/workspace"}'
-  RLM_HOOK_OUT=$(printf '%s' "${RLM_HOOK_INPUT}" | CLAUDE_PLUGIN_ROOT="${RLM_PLUGIN_DIR}" "${RLM_PLUGIN_DIR}/scripts/hook-dispatch.sh" session-init 2>&1) || true
-  echo "RLM hook check result: ${RLM_HOOK_OUT:0:200}"
-  if [ -z "${RLM_HOOK_OUT//[[:space:]]/}" ]; then
-    rlm_fail_or_warn "RLM hook check returned empty output"
   fi
-  if [[ "${RLM_HOOK_OUT}" == *'"status":"skipped"'* || "${RLM_HOOK_OUT}" == *'"status": "skipped"'* || "${RLM_HOOK_OUT}" == *"attempted relative import with no known parent package"* ]]; then
-    rlm_fail_or_warn "RLM hook check returned skipped/fallback output"
+
+  # =========================================================
+  # 7. Claude CLI health check
+  # =========================================================
+  echo "Claude CLI version: $(claude --version 2>&1 || echo 'UNKNOWN')"
+  echo "Claude CLI health check..."
+  HEALTH_OUT=$(claude -p "respond with just the word ok" --dangerously-skip-permissions --output-format text --max-turns 1 2>&1) || true
+  echo "Claude health check result: ${HEALTH_OUT:0:200}"
+  if [ "$HEALTH_OUT" = "Execution error" ]; then
+    echo "ERROR: Claude CLI returning 'Execution error'. Dumping diagnostics..."
+    echo "  HOME=$HOME"
+    echo "  Claude config dir: $(ls -la /home/agent/.claude/ 2>&1)"
+    echo "  Credentials file type: $(file "$CLAUDE_CREDS" 2>&1)"
+    echo "  Node version: $(node --version)"
+    echo "  Claude binary: $(which claude) -> $(readlink -f "$(which claude)" 2>/dev/null || echo 'not a symlink')"
+  fi
+
+  if is_truthy "${RLM_PLUGIN_ENABLED}" && [ -n "${RLM_PLUGIN_DIR:-}" ] && [ -x "${RLM_PLUGIN_DIR}/scripts/hook-dispatch.sh" ]; then
+    echo "RLM hook check..."
+    RLM_HOOK_INPUT='{"session_id":"rlm-bootstrap-healthcheck","source":"startup","cwd":"/workspace"}'
+    RLM_HOOK_OUT=$(printf '%s' "${RLM_HOOK_INPUT}" | CLAUDE_PLUGIN_ROOT="${RLM_PLUGIN_DIR}" "${RLM_PLUGIN_DIR}/scripts/hook-dispatch.sh" session-init 2>&1) || true
+    echo "RLM hook check result: ${RLM_HOOK_OUT:0:200}"
+    if [ -z "${RLM_HOOK_OUT//[[:space:]]/}" ]; then
+      rlm_fail_or_warn "RLM hook check returned empty output"
+    fi
+    if [[ "${RLM_HOOK_OUT}" == *'"status":"skipped"'* || "${RLM_HOOK_OUT}" == *'"status": "skipped"'* || "${RLM_HOOK_OUT}" == *"attempted relative import with no known parent package"* ]]; then
+      rlm_fail_or_warn "RLM hook check returned skipped/fallback output"
+    fi
+  fi
+else
+  # =========================================================
+  # 5. Validate Codex auth state
+  # =========================================================
+  CODEX_HOME="/home/agent/.codex"
+  CODEX_AUTH_SOURCE="${CODEX_AUTH_SOURCE:-/run/secrets/codex/auth.json}"
+
+  mkdir -p "${CODEX_HOME}"
+
+  if [ ! -f "${CODEX_AUTH_SOURCE}" ]; then
+    echo "FATAL: Codex auth file not found at ${CODEX_AUTH_SOURCE}"
+    echo "Mount your auth file via: -v /path/to/.codex/auth.json:${CODEX_AUTH_SOURCE}:ro"
+    exit 1
+  fi
+
+  cp "${CODEX_AUTH_SOURCE}" "${CODEX_HOME}/auth.json"
+  chmod 600 "${CODEX_HOME}/auth.json" 2>/dev/null || true
+
+  echo "Codex CLI version: $(codex --version 2>&1 || echo 'UNKNOWN')"
+  if ! codex login status; then
+    echo "FATAL: Codex login status check failed. Ensure auth file is valid: ${CODEX_AUTH_SOURCE}"
+    exit 1
+  fi
+
+  # =========================================================
+  # 6. Codex CLI health check
+  # =========================================================
+  CODEX_HEALTH_OUT=$(codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --output-last-message /tmp/codex-health-last-message.txt "respond with just ok" 2>&1) || true
+  echo "Codex health check result: ${CODEX_HEALTH_OUT:0:200}"
+  if [[ "${CODEX_HEALTH_OUT,,}" == *"not logged in"* || "${CODEX_HEALTH_OUT,,}" == *"authentication"* ]]; then
+    echo "FATAL: Codex authentication failed during health check."
+    exit 1
   fi
 fi
 

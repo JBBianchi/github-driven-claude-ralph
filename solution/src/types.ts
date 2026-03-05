@@ -1,5 +1,6 @@
 export type Role = 'planner' | 'executor';
 export type SigningMode = 'off' | 'gpg' | 'ssh';
+export type AgentProvider = 'claude' | 'codex';
 
 export interface Config {
   role: Role;
@@ -16,7 +17,11 @@ export interface Config {
   validationCommand: string;
   gitAuthorName: string;
   gitAuthorEmail: string;
-  /** Optional Claude model override resolved from environment variables. */
+  /** Selected agent CLI provider for this role. */
+  agentProvider: AgentProvider;
+  /** Optional model override resolved from environment variables. */
+  agentModel?: string;
+  /** Legacy alias mirrored from `agentModel` for backward compatibility. */
   claudeModel?: string;
   /** Enables passing custom Claude sub-agent definitions to the CLI. */
   claudeSubagentsEnabled: boolean;
@@ -74,27 +79,44 @@ export interface ClaudeSubagentDefinition {
  */
 export type ClaudeSubagentMap = Record<string, ClaudeSubagentDefinition>;
 
-export interface ClaudeInvocation {
+/**
+ * Provider-neutral invocation payload for agent CLI adapters.
+ */
+export interface AgentInvocation {
+  provider: AgentProvider;
   prompt: string;
   systemPromptFile?: string;
   maxTurns: number;
   outputFormat: 'text' | 'json';
   workingDirectory: string;
-  /** Optional Claude model passed as `--model` when provided. */
+  /** Optional model passed to the selected provider when supported. */
   model?: string;
-  /** Optional custom sub-agent definitions passed as `--agents` JSON. */
+  /** Optional custom Claude sub-agent definitions passed as `--agents` JSON. */
   agents?: ClaudeSubagentMap;
   resumeSessionId?: string;
   logger?: Logger;
   activity?: string;
 }
 
-export interface ClaudeResult {
+/**
+ * Result returned by an agent CLI adapter invocation.
+ */
+export interface AgentResult {
   success: boolean;
   sessionId?: string;
   result?: string;
   durationMs: number;
 }
+
+/**
+ * Claude adapter invocation payload.
+ */
+export type ClaudeInvocation = Omit<AgentInvocation, 'provider'>;
+
+/**
+ * Claude adapter result payload.
+ */
+export type ClaudeResult = AgentResult;
 
 export interface ExecutorState {
   activeTaskId: number | null;

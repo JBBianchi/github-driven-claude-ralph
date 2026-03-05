@@ -1,25 +1,25 @@
 # GitHub-Driven Claude Agent
 
-A Dockerized TypeScript orchestration layer that automates software development using Claude Code CLI. It monitors GitHub issues, creates implementation plans, decomposes them into tasks, writes code in isolated worktrees, opens PRs, and handles CI review loops — all autonomously.
+A Dockerized TypeScript orchestration layer that automates software development using either Claude Code CLI or Codex CLI. It monitors GitHub issues, creates implementation plans, decomposes them into tasks, writes code in isolated worktrees, opens PRs, and handles CI review loops — all autonomously.
 
 ## How it works
 
 The system runs two polling loops inside Docker containers:
 
-**Planner** reads GitHub issues labeled `feature` + `needs-plan`, invokes Claude Code to produce a plan issue, then decomposes approved plans into task issues.
+**Planner** reads GitHub issues labeled `feature` + `needs-plan`, invokes the selected provider CLI (`claude` or `codex`) to produce a plan issue, then decomposes approved plans into task issues.
 
-**Executor** claims a `todo` task via a nonce-based lease protocol, checks out a git worktree, invokes Claude Code to implement the changes, creates a PR, monitors CI, and runs a review loop (up to 3 attempts) if checks fail. On success it squash-merges the PR and closes the task.
+**Executor** claims a `todo` task via a nonce-based lease protocol, checks out a git worktree, invokes the selected provider CLI to implement the changes, creates a PR, monitors CI, and runs a review loop (up to 3 attempts) if checks fail. On success it squash-merges the PR and closes the task.
 
 ```
 Human creates feature issue
         |
         v
-  +-----------+     Claude reads issue, analyzes codebase,
+  +-----------+     Provider reads issue, analyzes codebase,
   |  Planner  | --> creates plan issue, decomposes into tasks
   +-----------+
         |
         v
-  +-----------+     Claude claims task, writes code in worktree,
+  +-----------+     Provider claims task, writes code in worktree,
   |  Executor | --> creates PR, fixes CI failures, merges
   +-----------+
         |
@@ -27,13 +27,15 @@ Human creates feature issue
   Merged PR + closed issue
 ```
 
-All reasoning happens inside Claude Code (invoked via `claude -p` in headless mode). The TypeScript layer only handles deterministic work: polling, task claiming, worktree management, label transitions, PR monitoring, and state recovery.
+All reasoning happens inside the selected provider CLI (Claude via `claude -p` or Codex via `codex exec`). The TypeScript layer only handles deterministic work: polling, task claiming, worktree management, label transitions, PR monitoring, and state recovery.
 
 ## Prerequisites
 
 - **Docker** and **Docker Compose**
 - A **GitHub personal access token** with `repo` scope
-- A **Claude credentials file** (`~/.claude/.credentials.json`)
+- Provider authentication:
+  - Claude mode: **Claude credentials file** (`~/.claude/.credentials.json`)
+  - Codex mode: **Codex auth file** (`~/.codex/auth.json`)
 - Outbound network access from containers (for RLM plugin bootstrap on startup)
 
 ## Quick start
@@ -64,23 +66,28 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `GH_TOKEN` | GitHub personal access token with `repo` scope |
 | `GIT_AUTHOR_NAME` | Git commit author name |
 | `GIT_AUTHOR_EMAIL` | Git commit author email |
-| `CLAUDE_CREDENTIALS_FILE` | Absolute path to your `~/.claude/.credentials.json` |
+| `CLAUDE_CREDENTIALS_FILE` | Absolute path to your `~/.claude/.credentials.json` (required for Claude mode) |
+| `CODEX_AUTH_FILE` | Absolute path to your `~/.codex/auth.json` file (required for Codex mode) |
 
 ### Optional
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BASE_BRANCH` | `main` | Branch to sync against |
+| `AGENT_PROVIDER` | `claude` | Shared provider selector: `claude` or `codex` |
+| `PLANNER_PROVIDER` | _(empty)_ | Optional planner override for provider (`claude` or `codex`) |
+| `EXECUTOR_PROVIDER` | _(empty)_ | Optional executor override for provider (`claude` or `codex`) |
 | `PLANNER_POLL_INTERVAL_SECONDS` | `120` | Seconds between planner iterations |
-| `PLANNER_MAX_TURNS` | `50` | Max Claude tool-use turns per planner invocation |
-| `PLANNER_MODEL` | _(empty)_ | Planner Claude model override (`--model`) |
+| `PLANNER_MAX_TURNS` | `50` | Max planner tool-use turns hint passed to provider adapters |
+| `PLANNER_MODEL` | _(empty)_ | Planner model override (`--model` where supported) |
 | `CLAUDE_SUBAGENTS_ENABLED` | `false` | Enable custom Claude sub-agent definitions via `--agents` |
 | `EXECUTOR_ID` | `executor-01` | Unique ID for this executor instance |
 | `EXECUTOR_POLL_INTERVAL_SECONDS` | `60` | Seconds between executor iterations |
-| `EXECUTOR_MAX_TURNS` | `100` | Max Claude tool-use turns per executor invocation |
-| `EXECUTOR_MODEL` | _(empty)_ | Executor Claude model override (`--model`) |
-| `CLAUDE_MODEL` | _(empty)_ | Shared fallback Claude model for both roles |
-| `VALIDATION_COMMAND` | _(empty)_ | Command for Claude to run before committing (e.g. `npm test`) |
+| `EXECUTOR_MAX_TURNS` | `100` | Max executor tool-use turns hint passed to provider adapters |
+| `EXECUTOR_MODEL` | _(empty)_ | Executor model override (`--model` where supported) |
+| `AGENT_MODEL` | _(empty)_ | Shared fallback model for both roles |
+| `CLAUDE_MODEL` | _(empty)_ | Legacy fallback alias (used after `AGENT_MODEL`) |
+| `VALIDATION_COMMAND` | _(empty)_ | Command for provider to run before committing (e.g. `npm test`) |
 | `GIT_COMMIT_SIGNING` | `off` | Commit signing mode: `off`, `gpg`, or `ssh` |
 | `GIT_SIGNING_KEY` | _(empty)_ | GPG key ID (required when `gpg` mode) |
 | `SIGNING_KEYS_PATH` | `./secrets` | Host path to signing key files |
@@ -97,13 +104,26 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `RLM_ACTIVATION_MODE` | `complexity` | Initial activation mode written to RLM config on first bootstrap |
 | `RLM_DEBUG` | `0` | Enable verbose RLM debug output (`1` to enable) |
 
-Model precedence is role-specific first, then shared fallback:
-- Planner: `PLANNER_MODEL` -> `CLAUDE_MODEL` -> Claude CLI default
-- Executor: `EXECUTOR_MODEL` -> `CLAUDE_MODEL` -> Claude CLI default
+Provider precedence is role-specific first, then shared fallback:
+- Planner: `PLANNER_PROVIDER` -> `AGENT_PROVIDER` -> `claude`
+- Executor: `EXECUTOR_PROVIDER` -> `AGENT_PROVIDER` -> `claude`
+
+Model precedence is role-specific first, then shared fallbacks:
+- Planner: `PLANNER_MODEL` -> `AGENT_MODEL` -> `CLAUDE_MODEL` -> provider default
+- Executor: `EXECUTOR_MODEL` -> `AGENT_MODEL` -> `CLAUDE_MODEL` -> provider default
+
+### Provider capability notes
+
+| Capability | Claude | Codex |
+|------------|--------|-------|
+| System prompt file | Native `--append-system-prompt-file` | Emulated by prepending file content to prompt |
+| Custom sub-agents | Native `--agents` | Not supported (ignored with warning) |
+| Max-turn control | Native `--max-turns` | No direct CLI flag (orchestrator timeout and bounded loops still apply) |
+| Session resume | `--resume <session_id>` | `codex exec resume <thread_id>` |
 
 ## RLM plugin integration
 
-The planner and executor now bootstrap `rand/rlm-claude-code` during `entrypoint.sh` startup:
+When provider is `claude`, the planner and executor bootstrap `rand/rlm-claude-code` during `entrypoint.sh` startup:
 
 1. Ensures `uv` is available.
 2. Installs `rlm-claude-code@rlm-claude-code` only when not already installed.
@@ -116,6 +136,8 @@ The planner and executor now bootstrap `rand/rlm-claude-code` during `entrypoint
 9. Mirrors entrypoint output to `/workspace/logs/entrypoint-<role>.log` for startup debugging.
 
 If `RLM_PLUGIN_REQUIRED=true`, startup fails fast when any RLM setup step fails.
+
+When provider is `codex`, Claude credential checks and RLM bootstrap are skipped. Startup copies mounted `auth.json` into each service-local `/home/agent/.codex` directory, runs `codex login status`, and executes a lightweight `codex exec` health check. Planner and executor keep separate Codex homes (separate Docker volumes).
 
 ## Commit signing
 
@@ -160,10 +182,13 @@ The system uses GitHub issue labels to track workflow state. Labels are auto-cre
 ```
 solution/
   src/
-    index.ts          Entry point — parses role, registers SIGTERM handler, starts loop
+    index.ts          Entry point - parses role, registers SIGTERM handler, starts loop
     planner.ts        Planner polling loop (plan creation + task decomposition)
     executor.ts       Executor polling loop (claim -> implement -> review -> merge)
+    agent-cli.ts      Provider dispatcher (claude/codex)
+    agent-auth.ts     Shared fatal authentication detection helpers
     claude.ts         Claude Code CLI wrapper (headless -p mode)
+    codex.ts          Codex CLI wrapper (codex exec / resume mode)
     github.ts         gh CLI wrapper (issues, PRs, labels, comments, claim protocol)
     git.ts            git CLI wrapper (sync, worktree, push)
     signing.ts        Signing key validation
@@ -171,15 +196,15 @@ solution/
     config.ts         Env var parsing + validation
     types.ts          Shared type definitions
     logger.ts         Structured logging
-  tests/unit/         124 unit tests (Vitest)
+  tests/unit/         Unit tests (Vitest)
   prompts/
     plan.md           Planner: create plans from features
     tasks.md          Planner: decompose plans into tasks
     exec.md           Executor: implement code changes
     review.md         Executor: diagnose and fix CI failures
   scripts/
-    entrypoint.sh     Credential setup + RLM plugin bootstrap + Claude health checks
-  Dockerfile          Multi-stage build (node:20-slim)
+    entrypoint.sh     Credential setup + provider-specific health checks
+  Dockerfile          Multi-stage build (node:24-slim)
   docker-compose.yml  Planner + executor services
   .env.example        Configuration template
 ```
@@ -208,7 +233,7 @@ node dist/index.js executor
 
 ### Testing
 
-The project has 124 unit tests covering all modules. All CLI calls (`git`, `gh`, `claude`) are mocked via `vi.mock('execa')`.
+The project has unit tests covering all modules. All CLI calls (`git`, `gh`, `claude`, `codex`) are mocked via `vi.mock('execa')`.
 
 ```bash
 # Run all tests
@@ -223,8 +248,8 @@ npx vitest
 
 ## Safety controls
 
-- **Max turns per invocation**: Caps Claude's tool calls (50 planner, 100 executor)
-- **30-minute timeout**: Hard kill per Claude invocation
+- **Max turns hint per invocation**: Passed to provider adapters (native in Claude, informational in Codex)
+- **30-minute timeout**: Hard kill per provider invocation
 - **Review loop**: Max 3 CI fix attempts before marking `blocked`
 - **Circuit breaker**: 3 consecutive iteration failures on the same task marks it `blocked`
 - **Graceful shutdown**: SIGTERM finishes the current iteration before exiting
@@ -232,3 +257,6 @@ npx vitest
 - **Non-root container**: Runs as `agent` user inside Docker
 - **Read-only key mounts**: Signing keys are mounted read-only, copied with proper permissions
 - **RLM fail-fast mode**: Optional startup hard-fail when plugin setup is required (`RLM_PLUGIN_REQUIRED=true`)
+
+
+

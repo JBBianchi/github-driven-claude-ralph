@@ -38,6 +38,9 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: '',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    agentProvider: 'claude',
+    agentModel: undefined,
+    claudeModel: undefined,
     claudeSubagentsEnabled: false,
     autonomousMode: false,
     autonomousMaxFeatures: 3,
@@ -678,6 +681,42 @@ describe('getPRStatus', () => {
 
     const status = await getPRStatus(makeConfig(), 56);
     expect(status).toBe('mergeable');
+  });
+
+  it('returns mergeable when no checks are reported and no review is required', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: '',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+    mockExeca.mockRejectedValueOnce(
+      new Error("no checks reported on the 'task/17-task-create-monorepo-package-layout' branch"),
+    );
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('mergeable');
+  });
+
+  it('returns pending when no checks are reported but review is required', async () => {
+    mockExeca.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        mergeable: 'MERGEABLE',
+        reviewDecision: 'REVIEW_REQUIRED',
+        mergeStateStatus: 'CLEAN',
+      }),
+      stderr: '',
+      exitCode: 0,
+    } as any);
+    mockExeca.mockRejectedValueOnce(
+      new Error("no checks reported on the 'task/17-task-create-monorepo-package-layout' branch"),
+    );
+
+    const status = await getPRStatus(makeConfig(), 56);
+    expect(status).toBe('pending');
   });
 });
 

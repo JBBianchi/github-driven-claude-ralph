@@ -21,7 +21,7 @@ import {
   addComment,
   requestCopilotReview,
 } from '../../src/github.js';
-import { invokeClaude } from '../../src/claude.js';
+import { invokeAgent } from '../../src/agent-cli.js';
 import {
   readExecutorState,
   writeExecutorState,
@@ -62,8 +62,8 @@ vi.mock('../../src/github.js', () => ({
   requestCopilotReview: vi.fn(),
 }));
 
-vi.mock('../../src/claude.js', () => ({
-  invokeClaude: vi.fn(),
+vi.mock('../../src/agent-cli.js', () => ({
+  invokeAgent: vi.fn(),
 }));
 
 vi.mock('../../src/state.js', () => ({
@@ -91,7 +91,7 @@ const mockCloseIssue = vi.mocked(closeIssue);
 const mockPostWorkMapping = vi.mocked(postWorkMapping);
 const mockAddComment = vi.mocked(addComment);
 const mockRequestCopilotReview = vi.mocked(requestCopilotReview);
-const mockInvokeClaude = vi.mocked(invokeClaude);
+const mockInvokeAgent = vi.mocked(invokeAgent);
 const mockReadExecutorState = vi.mocked(readExecutorState);
 const mockWriteExecutorState = vi.mocked(writeExecutorState);
 const mockClearActiveTask = vi.mocked(clearActiveTask);
@@ -113,6 +113,9 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: 'npm test',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    agentProvider: 'claude',
+    agentModel: undefined,
+    claudeModel: undefined,
     claudeSubagentsEnabled: false,
     autonomousMode: false,
     autonomousMaxFeatures: 3,
@@ -185,7 +188,7 @@ describe('runExecutorIteration', () => {
     mockRecoverStateFromGitHub.mockResolvedValue({ activeTaskId: 42, sessionId: null });
     // Set up rest of flow for active task
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
@@ -199,7 +202,7 @@ describe('runExecutorIteration', () => {
     mockRecoverStateFromGitHub.mockResolvedValue({ activeTaskId: null, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
     mockClaimTask.mockResolvedValue({ taskId: 42, nonce: 'abc', success: true });
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
@@ -216,7 +219,7 @@ describe('runExecutorIteration', () => {
       makeTask({ number: 42, title: 'Task: Older task' }),
     ]);
     mockClaimTask.mockResolvedValue({ taskId: 42, nonce: 'abc', success: true });
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
@@ -242,7 +245,7 @@ describe('runExecutorIteration', () => {
       ])
       .mockResolvedValueOnce([makeTask({ number: 42, title: 'Task: Older clean task' })]);
     mockClaimTask.mockResolvedValue({ taskId: 42, nonce: 'abc', success: true });
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     const logger = makeLogger();
@@ -274,7 +277,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), logger);
 
     expect(mockClaimTask).not.toHaveBeenCalled();
-    expect(mockInvokeClaude).not.toHaveBeenCalled();
+    expect(mockInvokeAgent).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('No tasks'),
       expect.anything(),
@@ -288,7 +291,7 @@ describe('runExecutorIteration', () => {
     const logger = makeLogger();
     await runExecutorIteration(makeConfig(), logger);
 
-    expect(mockInvokeClaude).not.toHaveBeenCalled();
+    expect(mockInvokeAgent).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('No tasks'),
       expect.anything(),
@@ -310,7 +313,7 @@ describe('runExecutorIteration', () => {
 
     await runExecutorIteration(makeConfig(), makeLogger());
 
-    expect(mockInvokeClaude).not.toHaveBeenCalled();
+    expect(mockInvokeAgent).not.toHaveBeenCalled();
   });
 
   // --- Phase 2: Worktree ---
@@ -323,7 +326,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), logger);
 
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
-    expect(mockInvokeClaude).not.toHaveBeenCalled();
+    expect(mockInvokeAgent).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('clearing stale state'),
       expect.objectContaining({ taskId: 42 }),
@@ -333,7 +336,7 @@ describe('runExecutorIteration', () => {
   it('creates worktree for claimed task', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
@@ -349,35 +352,50 @@ describe('runExecutorIteration', () => {
   it('invokes Claude with correct prompt, cwd, system prompt', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         workingDirectory: '/workspace/worktrees/42',
         outputFormat: 'json',
         maxTurns: 50,
       }),
     );
-    const call = mockInvokeClaude.mock.calls[0][0];
+    const call = mockInvokeAgent.mock.calls[0][0];
     expect(call.systemPromptFile).toContain('exec.md');
     expect(call.prompt).toContain('#42');
     expect(call.prompt).toContain('Add button');
   });
 
-  it('passes configured claudeModel during implementation', async () => {
+  it('passes configured agentModel during implementation', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
-    await runExecutorIteration(makeConfig({ claudeModel: 'claude-executor' }), makeLogger());
+    await runExecutorIteration(makeConfig({ agentModel: 'claude-executor' }), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'claude-executor',
+      }),
+    );
+  });
+
+  it('passes configured provider during implementation', async () => {
+    mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
+    mockListIssues.mockResolvedValue([makeTask()]);
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockFindPRByBranch.mockResolvedValue(null);
+
+    await runExecutorIteration(makeConfig({ agentProvider: 'codex' }), makeLogger());
+
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'codex',
       }),
     );
   });
@@ -385,12 +403,12 @@ describe('runExecutorIteration', () => {
   it('passes executor sub-agents during implementation when enabled', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-1', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig({ claudeSubagentsEnabled: true }), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         agents: expect.objectContaining({
           'executor-implementer': expect.any(Object),
@@ -404,7 +422,7 @@ describe('runExecutorIteration', () => {
   it('returns early when Claude implementation invocation fails', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: false, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: false, durationMs: 100 });
 
     await runExecutorIteration(makeConfig(), makeLogger());
 
@@ -414,15 +432,15 @@ describe('runExecutorIteration', () => {
   it('rethrows fatal Claude authentication errors to stop loop', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockRejectedValue(new Error('Claude authentication failed: OAuth token has expired.'));
+    mockInvokeAgent.mockRejectedValue(new Error('Agent authentication failed: OAuth token has expired.'));
 
-    await expect(runExecutorIteration(makeConfig(), makeLogger())).rejects.toThrow('Claude authentication failed');
+    await expect(runExecutorIteration(makeConfig(), makeLogger())).rejects.toThrow('Agent authentication failed');
   });
 
   it('saves sessionId from Claude result to state', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, sessionId: 'sess-new', durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, sessionId: 'sess-new', durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
@@ -436,12 +454,12 @@ describe('runExecutorIteration', () => {
   it('passes resumeSessionId when state has existing sessionId', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: 'sess-old' });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({ resumeSessionId: 'sess-old' }),
     );
   });
@@ -451,7 +469,7 @@ describe('runExecutorIteration', () => {
   it('finds PR by branch and checks status', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValue('mergeable');
 
@@ -464,7 +482,7 @@ describe('runExecutorIteration', () => {
   it('requests Copilot review when PR is found', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValue('mergeable');
 
@@ -476,7 +494,7 @@ describe('runExecutorIteration', () => {
   it('logs warning when Copilot review request is unavailable', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockRequestCopilotReview.mockResolvedValue(false);
     mockGetPRStatus.mockResolvedValue('pending');
@@ -493,7 +511,7 @@ describe('runExecutorIteration', () => {
   it('returns early when no PR exists yet', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     const logger = makeLogger();
@@ -506,7 +524,7 @@ describe('runExecutorIteration', () => {
     const config = makeConfig();
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValue('mergeable');
 
@@ -526,7 +544,7 @@ describe('runExecutorIteration', () => {
   it('continues task cleanup when remote branch deletion fails after merge', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValue('mergeable');
     mockDeleteRemoteBranch.mockRejectedValueOnce(new Error('remote ref does not exist'));
@@ -547,7 +565,7 @@ describe('runExecutorIteration', () => {
   it('does nothing on pending status', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValue('pending');
 
@@ -565,7 +583,7 @@ describe('runExecutorIteration', () => {
   it('resolves conflicts with clean merge, pushes, and merges PR when CI passes', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus
       .mockResolvedValueOnce('conflicting')   // initial check
@@ -585,7 +603,7 @@ describe('runExecutorIteration', () => {
   it('invokes Claude to resolve merge conflicts and completes task', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude
+    mockInvokeAgent
       .mockResolvedValueOnce({ success: true, durationMs: 100 })   // implementation
       .mockResolvedValueOnce({ success: true, durationMs: 200 });  // conflict resolution
     mockFindPRByBranch.mockResolvedValue(makePR());
@@ -598,8 +616,8 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), makeLogger());
 
     // Claude called twice: implementation + conflict resolution
-    expect(mockInvokeClaude).toHaveBeenCalledTimes(2);
-    const conflictCall = mockInvokeClaude.mock.calls[1][0];
+    expect(mockInvokeAgent).toHaveBeenCalledTimes(2);
+    const conflictCall = mockInvokeAgent.mock.calls[1][0];
     expect(conflictCall.prompt).toContain('merge conflicts');
     expect(conflictCall.prompt).toContain('#42');
     expect(conflictCall.prompt).toContain('#56');
@@ -609,10 +627,10 @@ describe('runExecutorIteration', () => {
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
   });
 
-  it('passes configured claudeModel during conflict resolution', async () => {
+  it('passes configured agentModel during conflict resolution', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude
+    mockInvokeAgent
       .mockResolvedValueOnce({ success: true, durationMs: 100 })
       .mockResolvedValueOnce({ success: true, durationMs: 200 });
     mockFindPRByBranch.mockResolvedValue(makePR());
@@ -621,9 +639,9 @@ describe('runExecutorIteration', () => {
       .mockResolvedValueOnce('mergeable');
     mockMergeBase.mockResolvedValue(false);
 
-    await runExecutorIteration(makeConfig({ claudeModel: 'claude-executor' }), makeLogger());
+    await runExecutorIteration(makeConfig({ agentModel: 'claude-executor' }), makeLogger());
 
-    const conflictCall = mockInvokeClaude.mock.calls[1][0];
+    const conflictCall = mockInvokeAgent.mock.calls[1][0];
     expect(conflictCall).toEqual(
       expect.objectContaining({
         model: 'claude-executor',
@@ -634,7 +652,7 @@ describe('runExecutorIteration', () => {
   it('aborts merge and breaks when Claude fails to resolve conflicts', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude
+    mockInvokeAgent
       .mockResolvedValueOnce({ success: true, durationMs: 100 })  // implementation
       .mockResolvedValueOnce({ success: false, durationMs: 200 }); // conflict resolution failed
     mockFindPRByBranch.mockResolvedValue(makePR());
@@ -658,7 +676,7 @@ describe('runExecutorIteration', () => {
   it('enters review loop when CI fails after conflict resolution', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus
       .mockResolvedValueOnce('conflicting')  // initial check
@@ -671,7 +689,7 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), makeLogger());
 
     // implementation + review = 2 Claude calls
-    expect(mockInvokeClaude).toHaveBeenCalledTimes(2);
+    expect(mockInvokeAgent).toHaveBeenCalledTimes(2);
     expect(mockMergePR).toHaveBeenCalledWith(expect.anything(), 56);
     expect(mockDeleteRemoteBranch).toHaveBeenCalledWith('task/42-add-button');
     expect(mockClearActiveTask).toHaveBeenCalledWith('executor-01');
@@ -682,7 +700,7 @@ describe('runExecutorIteration', () => {
   it('enters review loop when PR status is failing', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValueOnce('failing');
     mockGetPRCheckDetails.mockResolvedValue('build: FAILURE');
@@ -693,21 +711,21 @@ describe('runExecutorIteration', () => {
 
     expect(mockGetPRCheckDetails).toHaveBeenCalled();
     // Claude called twice: once for implementation, once for review
-    expect(mockInvokeClaude).toHaveBeenCalledTimes(2);
+    expect(mockInvokeAgent).toHaveBeenCalledTimes(2);
   });
 
-  it('passes configured claudeModel during review attempts', async () => {
+  it('passes configured agentModel during review attempts', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValueOnce('failing');
     mockGetPRCheckDetails.mockResolvedValue('build: FAILURE');
     mockGetPRStatus.mockResolvedValueOnce('mergeable');
 
-    await runExecutorIteration(makeConfig({ claudeModel: 'claude-executor' }), makeLogger());
+    await runExecutorIteration(makeConfig({ agentModel: 'claude-executor' }), makeLogger());
 
-    const reviewCall = mockInvokeClaude.mock.calls[1][0];
+    const reviewCall = mockInvokeAgent.mock.calls[1][0];
     expect(reviewCall).toEqual(
       expect.objectContaining({
         model: 'claude-executor',
@@ -718,7 +736,7 @@ describe('runExecutorIteration', () => {
   it('pushes branch after each review attempt', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValueOnce('failing');
     mockGetPRCheckDetails.mockResolvedValue('build: FAILURE');
@@ -732,7 +750,7 @@ describe('runExecutorIteration', () => {
   it('merges if CI passes after fix', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValueOnce('failing');
     mockGetPRCheckDetails.mockResolvedValue('build: FAILURE');
@@ -747,7 +765,7 @@ describe('runExecutorIteration', () => {
   it('retries review up to 3 times', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     // Initial status: failing
     mockGetPRStatus.mockResolvedValueOnce('failing');
@@ -760,13 +778,13 @@ describe('runExecutorIteration', () => {
     await runExecutorIteration(makeConfig(), makeLogger());
 
     // 1 implementation + 3 review = 4 total Claude calls
-    expect(mockInvokeClaude).toHaveBeenCalledTimes(4);
+    expect(mockInvokeAgent).toHaveBeenCalledTimes(4);
   });
 
   it('marks task as blocked after exhausting review attempts', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(makePR());
     mockGetPRStatus.mockResolvedValueOnce('failing');
     mockGetPRCheckDetails.mockResolvedValue('build: FAILURE');
@@ -824,7 +842,7 @@ describe('runExecutorIteration', () => {
   it('resets consecutiveFailures on successful iteration with active task', async () => {
     mockReadExecutorState.mockReturnValue({ activeTaskId: 42, sessionId: null, consecutiveFailures: 2 });
     mockListIssues.mockResolvedValue([makeTask()]);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockFindPRByBranch.mockResolvedValue(null);
 
     await runExecutorIteration(makeConfig(), makeLogger());
@@ -978,4 +996,6 @@ describe('runExecutorLoop', () => {
     );
   });
 });
+
+
 

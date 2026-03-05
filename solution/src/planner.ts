@@ -6,18 +6,14 @@ import {
   parseAgentMeta,
   addComment,
 } from './github.js';
-import { invokeClaude } from './claude.js';
+import { isFatalAgentAuthError } from './agent-auth.js';
+import { invokeAgent } from './agent-cli.js';
 import { getClaudeSubagents } from './subagents.js';
 import { LABELS } from './labels.js';
 import type { Config, Logger, GitHubIssue } from './types.js';
 
 const PROMPTS_DIR = '/opt/agent/prompts';
 const WAITING_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-const CLAUDE_AUTH_FAILURE_PREFIX = 'Claude authentication failed:';
-
-function isFatalClaudeAuthError(error: unknown): boolean {
-  return String(error).includes(CLAUDE_AUTH_FAILURE_PREFIX);
-}
 
 function hasLabel(issue: GitHubIssue, label: string): boolean {
   return issue.labels.includes(label);
@@ -121,13 +117,14 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
         });
 
         const prompt = buildAutonomousPrompt(config, existingIssues);
-        const result = await invokeClaude({
+        const result = await invokeAgent({
+          provider: config.agentProvider,
           prompt,
           systemPromptFile: `${PROMPTS_DIR}/analyze.md`,
           maxTurns: config.maxTurnsPerRun,
           outputFormat: 'text',
           workingDirectory: '/workspace/repo',
-          model: config.claudeModel,
+          model: config.agentModel,
           agents: claudeSubagents,
         });
 
@@ -139,8 +136,8 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
         });
       }
     } catch (error) {
-      if (isFatalClaudeAuthError(error)) {
-        logger.error('Fatal Claude authentication failure. Stopping planner loop.', {
+      if (isFatalAgentAuthError(error)) {
+        logger.error('Fatal agent authentication failure. Stopping planner loop.', {
           error: String(error),
         });
         throw error;
@@ -155,17 +152,18 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
     if (features.length > 0) {
       logger.info('Found features needing plans', { count: features.length });
       const prompt = buildPlannerPrompt(config, features);
-      logger.info('Invoking Claude for plan creation', {});
-      const result = await invokeClaude({
+      logger.info('Invoking agent for plan creation', { provider: config.agentProvider });
+      const result = await invokeAgent({
+        provider: config.agentProvider,
         prompt,
         systemPromptFile: `${PROMPTS_DIR}/plan.md`,
         maxTurns: config.maxTurnsPerRun,
         outputFormat: 'text',
         workingDirectory: '/workspace/repo',
-        model: config.claudeModel,
+        model: config.agentModel,
         agents: claudeSubagents,
       });
-      logger.info('Claude plan creation finished', {
+      logger.info('Agent plan creation finished', {
         success: result.success,
         durationMs: result.durationMs,
         outputLength: result.result?.length ?? 0,
@@ -173,8 +171,8 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
       });
     }
   } catch (error) {
-    if (isFatalClaudeAuthError(error)) {
-      logger.error('Fatal Claude authentication failure. Stopping planner loop.', { error: String(error) });
+    if (isFatalAgentAuthError(error)) {
+      logger.error('Fatal agent authentication failure. Stopping planner loop.', { error: String(error) });
       throw error;
     }
     logger.error('Phase 1 (plan creation) failed', { error: String(error) });
@@ -189,19 +187,20 @@ export async function runPlannerIteration(config: Config, logger: Logger): Promi
     if (plansNeedingTasks.length > 0) {
       logger.info('Found plans needing task decomposition', { count: plansNeedingTasks.length });
       const prompt = buildTaskDecompPrompt(config, plansNeedingTasks);
-      await invokeClaude({
+      await invokeAgent({
+        provider: config.agentProvider,
         prompt,
         systemPromptFile: `${PROMPTS_DIR}/tasks.md`,
         maxTurns: config.maxTurnsPerRun,
         outputFormat: 'text',
         workingDirectory: '/workspace/repo',
-        model: config.claudeModel,
+        model: config.agentModel,
         agents: claudeSubagents,
       });
     }
   } catch (error) {
-    if (isFatalClaudeAuthError(error)) {
-      logger.error('Fatal Claude authentication failure. Stopping planner loop.', { error: String(error) });
+    if (isFatalAgentAuthError(error)) {
+      logger.error('Fatal agent authentication failure. Stopping planner loop.', { error: String(error) });
       throw error;
     }
     logger.error('Phase 2 (task decomposition) failed', { error: String(error) });

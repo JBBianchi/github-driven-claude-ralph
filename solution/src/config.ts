@@ -1,4 +1,4 @@
-import type { Config, Role, SigningMode } from './types.js';
+import type { AgentProvider, Config, Role, SigningMode } from './types.js';
 import {
   closeSync,
   mkdirSync,
@@ -12,6 +12,7 @@ import {
 import { posix as pathPosix } from 'node:path';
 
 const VALID_SIGNING_MODES: SigningMode[] = ['off', 'gpg', 'ssh'];
+const VALID_AGENT_PROVIDERS: AgentProvider[] = ['claude', 'codex'];
 const EXECUTOR_ID_PREFIX = 'executor-';
 const EXECUTOR_ID_PADDING = 2;
 const DEFAULT_EXECUTOR_ID = 'executor-01';
@@ -213,12 +214,27 @@ function resolveExecutorId(role: Role): string {
   return allocateExecutorId();
 }
 
-function resolveClaudeModel(role: Role): string | undefined {
+function resolveAgentProvider(role: Role): AgentProvider {
+  const roleProvider = role === 'planner'
+    ? optionalTrimmedEnv('PLANNER_PROVIDER')
+    : optionalTrimmedEnv('EXECUTOR_PROVIDER');
+  const provider = roleProvider ?? optionalTrimmedEnv('AGENT_PROVIDER') ?? 'claude';
+
+  if (!VALID_AGENT_PROVIDERS.includes(provider as AgentProvider)) {
+    throw new Error(
+      `Invalid provider value: "${provider}". Expected: claude or codex`,
+    );
+  }
+
+  return provider as AgentProvider;
+}
+
+function resolveAgentModel(role: Role): string | undefined {
   const roleModel = role === 'planner'
     ? optionalTrimmedEnv('PLANNER_MODEL')
     : optionalTrimmedEnv('EXECUTOR_MODEL');
 
-  return roleModel ?? optionalTrimmedEnv('CLAUDE_MODEL');
+  return roleModel ?? optionalTrimmedEnv('AGENT_MODEL') ?? optionalTrimmedEnv('CLAUDE_MODEL');
 }
 
 export function loadConfig(role: Role): Config {
@@ -265,6 +281,8 @@ export function loadConfig(role: Role): Config {
     );
   }
 
+  const agentModel = resolveAgentModel(role);
+
   return {
     role,
     repoUrl,
@@ -282,7 +300,9 @@ export function loadConfig(role: Role): Config {
     validationCommand: process.env.VALIDATION_COMMAND || '',
     gitAuthorName,
     gitAuthorEmail,
-    claudeModel: resolveClaudeModel(role),
+    agentProvider: resolveAgentProvider(role),
+    agentModel,
+    claudeModel: agentModel,
     claudeSubagentsEnabled: process.env.CLAUDE_SUBAGENTS_ENABLED === 'true',
     autonomousMode: process.env.PLANNER_AUTONOMOUS_MODE === 'true',
     autonomousMaxFeatures,

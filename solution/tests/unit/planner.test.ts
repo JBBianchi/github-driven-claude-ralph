@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { syncRepo } from '../../src/git.js';
 import { listIssues, editIssueLabels, closeIssue, parseAgentMeta, addComment } from '../../src/github.js';
-import { invokeClaude } from '../../src/claude.js';
+import { invokeAgent } from '../../src/agent-cli.js';
 import {
   runPlannerIteration,
   buildPlannerPrompt,
@@ -22,13 +22,13 @@ vi.mock('../../src/github.js', () => ({
   addComment: vi.fn(),
 }));
 
-vi.mock('../../src/claude.js', () => ({
-  invokeClaude: vi.fn(),
+vi.mock('../../src/agent-cli.js', () => ({
+  invokeAgent: vi.fn(),
 }));
 
 const mockSyncRepo = vi.mocked(syncRepo);
 const mockListIssues = vi.mocked(listIssues);
-const mockInvokeClaude = vi.mocked(invokeClaude);
+const mockInvokeAgent = vi.mocked(invokeAgent);
 const mockEditIssueLabels = vi.mocked(editIssueLabels);
 const mockCloseIssue = vi.mocked(closeIssue);
 const mockParseAgentMeta = vi.mocked(parseAgentMeta);
@@ -50,6 +50,9 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     validationCommand: '',
     gitAuthorName: 'Bot',
     gitAuthorEmail: 'bot@test.com',
+    agentProvider: 'claude',
+    agentModel: undefined,
+    claudeModel: undefined,
     claudeSubagentsEnabled: false,
     autonomousMode: false,
     autonomousMaxFeatures: 3,
@@ -90,7 +93,7 @@ describe('runPlannerIteration', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockSyncRepo.mockResolvedValue(undefined);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockEditIssueLabels.mockResolvedValue(undefined);
     mockCloseIssue.mockResolvedValue(undefined);
     mockAddComment.mockResolvedValue(undefined);
@@ -112,22 +115,37 @@ describe('runPlannerIteration', () => {
 
     await runPlannerIteration(makeConfig(), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({ systemPromptFile: expect.stringContaining('plan.md') }),
     );
   });
 
-  it('passes configured claudeModel to planner invocations', async () => {
+  it('passes configured agentModel to planner invocations', async () => {
     const feature = makeIssue({ number: 1, title: 'Add login' });
     setListIssuesMap({
       'open|needs-plan': [feature],
     });
 
-    await runPlannerIteration(makeConfig({ claudeModel: 'claude-planner' }), makeLogger());
+    await runPlannerIteration(makeConfig({ agentModel: 'claude-planner' }), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'claude-planner',
+      }),
+    );
+  });
+
+  it('passes configured provider to planner invocations', async () => {
+    const feature = makeIssue({ number: 1, title: 'Add login' });
+    setListIssuesMap({
+      'open|needs-plan': [feature],
+    });
+
+    await runPlannerIteration(makeConfig({ agentProvider: 'codex' }), makeLogger());
+
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'codex',
       }),
     );
   });
@@ -140,7 +158,7 @@ describe('runPlannerIteration', () => {
 
     await runPlannerIteration(makeConfig({ claudeSubagentsEnabled: true }), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         agents: expect.objectContaining({
           'planner-codebase-analyst': expect.any(Object),
@@ -156,9 +174,9 @@ describe('runPlannerIteration', () => {
     setListIssuesMap({
       'open|needs-plan': [feature],
     });
-    mockInvokeClaude.mockRejectedValue(new Error('Claude authentication failed: OAuth token has expired.'));
+    mockInvokeAgent.mockRejectedValue(new Error('Agent authentication failed: OAuth token has expired.'));
 
-    await expect(runPlannerIteration(makeConfig(), makeLogger())).rejects.toThrow('Claude authentication failed');
+    await expect(runPlannerIteration(makeConfig(), makeLogger())).rejects.toThrow('Agent authentication failed');
   });
 
   it('invokes Claude for task decomposition when ready plans exist', async () => {
@@ -173,7 +191,7 @@ describe('runPlannerIteration', () => {
 
     await runPlannerIteration(makeConfig(), makeLogger());
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({ systemPromptFile: expect.stringContaining('tasks.md') }),
     );
   });
@@ -395,7 +413,7 @@ describe('Phase 3 - plan-sequential gating', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockSyncRepo.mockResolvedValue(undefined);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockEditIssueLabels.mockResolvedValue(undefined);
     mockCloseIssue.mockResolvedValue(undefined);
     mockAddComment.mockResolvedValue(undefined);
@@ -514,7 +532,7 @@ describe('Phase 4 - hardened plan completion', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockSyncRepo.mockResolvedValue(undefined);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockEditIssueLabels.mockResolvedValue(undefined);
     mockCloseIssue.mockResolvedValue(undefined);
     mockAddComment.mockResolvedValue(undefined);
@@ -685,7 +703,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockSyncRepo.mockResolvedValue(undefined);
-    mockInvokeClaude.mockResolvedValue({ success: true, durationMs: 100 });
+    mockInvokeAgent.mockResolvedValue({ success: true, durationMs: 100 });
     mockEditIssueLabels.mockResolvedValue(undefined);
     mockCloseIssue.mockResolvedValue(undefined);
     mockAddComment.mockResolvedValue(undefined);
@@ -696,7 +714,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
   it('skips Phase 0 when autonomousMode is false', async () => {
     await runPlannerIteration(makeConfig({ autonomousMode: false }), makeLogger());
 
-    expect(mockInvokeClaude).not.toHaveBeenCalledWith(
+    expect(mockInvokeAgent).not.toHaveBeenCalledWith(
       expect.objectContaining({ systemPromptFile: expect.stringContaining('analyze.md') }),
     );
   });
@@ -708,7 +726,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
 
     await runPlannerIteration(makeConfig({ autonomousMode: true }), makeLogger());
 
-    expect(mockInvokeClaude).not.toHaveBeenCalledWith(
+    expect(mockInvokeAgent).not.toHaveBeenCalledWith(
       expect.objectContaining({ systemPromptFile: expect.stringContaining('analyze.md') }),
     );
   });
@@ -720,7 +738,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
 
     await runPlannerIteration(makeConfig({ autonomousMode: true }), makeLogger());
 
-    expect(mockInvokeClaude).not.toHaveBeenCalledWith(
+    expect(mockInvokeAgent).not.toHaveBeenCalledWith(
       expect.objectContaining({ systemPromptFile: expect.stringContaining('analyze.md') }),
     );
   });
@@ -732,7 +750,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
 
     await runPlannerIteration(makeConfig({ autonomousMode: true }), makeLogger());
 
-    expect(mockInvokeClaude).not.toHaveBeenCalledWith(
+    expect(mockInvokeAgent).not.toHaveBeenCalledWith(
       expect.objectContaining({ systemPromptFile: expect.stringContaining('analyze.md') }),
     );
   });
@@ -743,7 +761,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
       makeLogger(),
     );
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         systemPromptFile: expect.stringContaining('analyze.md'),
       }),
@@ -761,7 +779,7 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
       makeLogger(),
     );
 
-    expect(mockInvokeClaude).toHaveBeenCalledWith(
+    expect(mockInvokeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         prompt: expect.stringContaining('#42'),
       }),
@@ -790,12 +808,14 @@ describe('runPlannerIteration - Phase 0 (autonomous)', () => {
   });
 
   it('rethrows fatal Claude auth errors in Phase 0', async () => {
-    mockInvokeClaude.mockRejectedValueOnce(
-      new Error('Claude authentication failed: OAuth token has expired.'),
+    mockInvokeAgent.mockRejectedValueOnce(
+      new Error('Agent authentication failed: OAuth token has expired.'),
     );
 
     await expect(
       runPlannerIteration(makeConfig({ autonomousMode: true }), makeLogger()),
-    ).rejects.toThrow('Claude authentication failed');
+    ).rejects.toThrow('Agent authentication failed');
   });
 });
+
+

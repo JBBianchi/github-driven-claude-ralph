@@ -20,7 +20,8 @@ import {
   addComment,
   requestCopilotReview,
 } from './github.js';
-import { invokeClaude } from './claude.js';
+import { isFatalAgentAuthError } from './agent-auth.js';
+import { invokeAgent } from './agent-cli.js';
 import { getClaudeSubagents } from './subagents.js';
 import {
   readExecutorState,
@@ -42,7 +43,6 @@ import type {
 const PROMPTS_DIR = '/opt/agent/prompts';
 const MAX_REVIEW_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_FAILURES = 3;
-const CLAUDE_AUTH_FAILURE_PREFIX = 'Claude authentication failed:';
 
 async function listRunnableTasks(config: Config, logger: Logger): Promise<GitHubIssue[]> {
   const tasks = await listIssues(config, [LABELS.task, LABELS.statusTodo]);
@@ -58,10 +58,6 @@ async function listRunnableTasks(config: Config, logger: Logger): Promise<GitHub
   }
 
   return tasks.filter((task) => task.labels.every((label) => !label.startsWith(CLAIMED_BY_PREFIX)));
-}
-
-function isFatalClaudeAuthError(error: unknown): boolean {
-  return String(error).includes(CLAUDE_AUTH_FAILURE_PREFIX);
 }
 
 export function buildExecutorPrompt(
@@ -168,27 +164,28 @@ async function runReviewLoop(
     const checkDetails = await getPRCheckDetails(config, pr.number);
     const prompt = buildReviewPrompt(config, task, pr, checkDetails);
 
-    const reviewResult = await invokeClaude({
+    const reviewResult = await invokeAgent({
+      provider: config.agentProvider,
       prompt,
       systemPromptFile: `${PROMPTS_DIR}/review.md`,
       maxTurns: config.maxTurnsPerRun,
       outputFormat: 'text',
       workingDirectory: worktreePath,
-      model: config.claudeModel,
+      model: config.agentModel,
       agents,
       logger,
       activity: 'executor-review',
     });
-    logger.info('Review attempt Claude finished', {
+    logger.info('Review attempt agent invocation finished', {
       attempt: attempt + 1,
       taskId: task.number,
       prNumber: pr.number,
       success: reviewResult.success,
-      claudeDurationMs: reviewResult.durationMs,
+      agentDurationMs: reviewResult.durationMs,
       attemptDurationMs: Date.now() - attemptStartedAt,
     });
     if (!reviewResult.success) {
-      logger.warn('Claude review invocation failed; deferring to next iteration', {
+      logger.warn('Agent review invocation failed; deferring to next iteration', {
         taskId: task.number,
         prNumber: pr.number,
       });
@@ -322,13 +319,14 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     });
     const implementationStartedAt = Date.now();
     const prompt = buildExecutorPrompt(config, task, branch, worktreePath);
-    const result = await invokeClaude({
+    const result = await invokeAgent({
+      provider: config.agentProvider,
       prompt,
       systemPromptFile: `${PROMPTS_DIR}/exec.md`,
       maxTurns: config.maxTurnsPerRun,
       outputFormat: 'json',
       workingDirectory: worktreePath,
-      model: config.claudeModel,
+      model: config.agentModel,
       agents: claudeSubagents,
       resumeSessionId: state.sessionId ?? undefined,
       logger,
@@ -337,12 +335,12 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
     logger.info('Implementation phase finished', {
       taskId: task.number,
       success: result.success,
-      claudeDurationMs: result.durationMs,
+      agentDurationMs: result.durationMs,
       durationMs: Date.now() - implementationStartedAt,
     });
     if (!result.success) {
       outcome = 'implementation-failed';
-      logger.warn('Claude implementation invocation failed; deferring to next iteration', {
+      logger.warn('Agent implementation invocation failed; deferring to next iteration', {
         taskId: state.activeTaskId,
       });
       return;
@@ -420,20 +418,21 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
         const mergeClean = await mergeBase(config, worktreePath);
         if (!mergeClean) {
           const conflictPrompt = buildConflictPrompt(config, task, pr, worktreePath);
-          const resolveResult = await invokeClaude({
+          const resolveResult = await invokeAgent({
+            provider: config.agentProvider,
             prompt: conflictPrompt,
             systemPromptFile: `${PROMPTS_DIR}/exec.md`,
             maxTurns: config.maxTurnsPerRun,
             outputFormat: 'text',
             workingDirectory: worktreePath,
-            model: config.claudeModel,
+            model: config.agentModel,
             agents: claudeSubagents,
             logger,
             activity: 'executor-conflict-resolution',
           });
           if (!resolveResult.success) {
             outcome = 'conflict-resolution-failed';
-            logger.warn('Claude conflict resolution failed; aborting merge', {
+            logger.warn('Agent conflict resolution failed; aborting merge', {
               taskId: task.number,
               prNumber: pr.number,
             });
@@ -492,9 +491,9 @@ export async function runExecutorIteration(config: Config, logger: Logger): Prom
       writeExecutorState(config.executorId, state);
     }
   } catch (error) {
-    if (isFatalClaudeAuthError(error)) {
+    if (isFatalAgentAuthError(error)) {
       outcome = 'fatal-auth-error';
-      logger.error('Fatal Claude authentication failure. Stopping executor loop.', { error: String(error) });
+      logger.error('Fatal agent authentication failure. Stopping executor loop.', { error: String(error) });
       throw error;
     }
 

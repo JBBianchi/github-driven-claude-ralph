@@ -84,6 +84,8 @@ describe('loadConfig', () => {
     expect(config.baseBranch).toBe('main');
     expect(config.gitCommitSigning).toBe('off');
     expect(config.role).toBe('planner');
+    expect(config.agentProvider).toBe('claude');
+    expect(config.agentModel).toBeUndefined();
     expect(config.claudeSubagentsEnabled).toBe(false);
   });
 
@@ -203,57 +205,123 @@ describe('loadConfig', () => {
     expect(config.signingKeysMount).toBe('/custom/keys');
   });
 
-  it('uses PLANNER_MODEL over CLAUDE_MODEL for planner role', () => {
+  it('uses PLANNER_MODEL over AGENT_MODEL and CLAUDE_MODEL for planner role', () => {
     Object.assign(process.env, requiredEnv, {
+      AGENT_MODEL: 'agent-global',
       CLAUDE_MODEL: 'claude-global',
       PLANNER_MODEL: 'claude-planner',
     });
 
     const config = loadConfig('planner');
 
+    expect(config.agentModel).toBe('claude-planner');
     expect(config.claudeModel).toBe('claude-planner');
   });
 
-  it('falls back to CLAUDE_MODEL when PLANNER_MODEL is missing', () => {
+  it('falls back to AGENT_MODEL when PLANNER_MODEL is missing', () => {
+    Object.assign(process.env, requiredEnv, {
+      AGENT_MODEL: 'agent-global',
+      CLAUDE_MODEL: 'claude-global',
+    });
+
+    const config = loadConfig('planner');
+
+    expect(config.agentModel).toBe('agent-global');
+    expect(config.claudeModel).toBe('agent-global');
+  });
+
+  it('falls back to CLAUDE_MODEL when AGENT_MODEL is missing', () => {
     Object.assign(process.env, requiredEnv, {
       CLAUDE_MODEL: 'claude-global',
     });
 
     const config = loadConfig('planner');
 
+    expect(config.agentModel).toBe('claude-global');
     expect(config.claudeModel).toBe('claude-global');
   });
 
-  it('uses EXECUTOR_MODEL over CLAUDE_MODEL for executor role', () => {
+  it('uses EXECUTOR_MODEL over AGENT_MODEL and CLAUDE_MODEL for executor role', () => {
     Object.assign(process.env, requiredEnv, {
+      AGENT_MODEL: 'agent-global',
       CLAUDE_MODEL: 'claude-global',
       EXECUTOR_MODEL: 'claude-executor',
     });
 
     const config = loadConfig('executor');
 
+    expect(config.agentModel).toBe('claude-executor');
     expect(config.claudeModel).toBe('claude-executor');
   });
 
-  it('falls back to CLAUDE_MODEL when EXECUTOR_MODEL is missing', () => {
+  it('falls back to AGENT_MODEL when EXECUTOR_MODEL is missing', () => {
     Object.assign(process.env, requiredEnv, {
-      CLAUDE_MODEL: 'claude-global',
+      AGENT_MODEL: 'agent-global',
     });
 
     const config = loadConfig('executor');
 
-    expect(config.claudeModel).toBe('claude-global');
+    expect(config.agentModel).toBe('agent-global');
+    expect(config.claudeModel).toBe('agent-global');
   });
 
   it('treats blank model values as unset', () => {
     Object.assign(process.env, requiredEnv, {
+      AGENT_MODEL: '   ',
       CLAUDE_MODEL: '   ',
       PLANNER_MODEL: '\t',
     });
 
     const config = loadConfig('planner');
 
+    expect(config.agentModel).toBeUndefined();
     expect(config.claudeModel).toBeUndefined();
+  });
+
+  it('defaults provider to claude when provider env vars are unset', () => {
+    Object.assign(process.env, requiredEnv);
+
+    const plannerConfig = loadConfig('planner');
+    const executorConfig = loadConfig('executor');
+
+    expect(plannerConfig.agentProvider).toBe('claude');
+    expect(executorConfig.agentProvider).toBe('claude');
+  });
+
+  it('uses AGENT_PROVIDER when role-specific provider is missing', () => {
+    Object.assign(process.env, requiredEnv, { AGENT_PROVIDER: 'codex' });
+
+    const config = loadConfig('planner');
+
+    expect(config.agentProvider).toBe('codex');
+  });
+
+  it('uses PLANNER_PROVIDER over AGENT_PROVIDER for planner role', () => {
+    Object.assign(process.env, requiredEnv, {
+      AGENT_PROVIDER: 'claude',
+      PLANNER_PROVIDER: 'codex',
+    });
+
+    const config = loadConfig('planner');
+
+    expect(config.agentProvider).toBe('codex');
+  });
+
+  it('uses EXECUTOR_PROVIDER over AGENT_PROVIDER for executor role', () => {
+    Object.assign(process.env, requiredEnv, {
+      AGENT_PROVIDER: 'claude',
+      EXECUTOR_PROVIDER: 'codex',
+    });
+
+    const config = loadConfig('executor');
+
+    expect(config.agentProvider).toBe('codex');
+  });
+
+  it('throws when AGENT_PROVIDER is invalid', () => {
+    Object.assign(process.env, requiredEnv, { AGENT_PROVIDER: 'invalid-provider' });
+
+    expect(() => loadConfig('planner')).toThrow(/claude or codex/);
   });
 
   it('throws on invalid GIT_COMMIT_SIGNING value', () => {
